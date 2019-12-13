@@ -62,7 +62,7 @@ And it compiles to the asm code:
 
 Now let's start:
 
-```
+```rust
 use ilhook::x86::{Hooker, HookType, Registers, CallbackOption, HookFlags};
 
 unsafe extern "C" fn on_check_sn(reg:*mut Registers, _:usize){
