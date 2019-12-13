@@ -1,0 +1,22 @@
+[package]
+name = "ilhook"
+description = "A library that provides methods to inline hook binary codes in x86 and x86_64 architecture"
+version = "0.1.0"
+authors = ["fallingsunz <fallingsunz@gmail.com>"]
+edition = "2018"
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/regomne/ilhook-rs"
+keywords = ["hook", "assemble", "disassemble"]
+categories = ["hardware-support"]
+
+[dependencies]
+capstone = "0.6"
+thiserror = "1.0"
+bitflags = "1.2"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["memoryapi", "minwindef", "errhandlingapi"] }
