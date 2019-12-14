@@ -690,6 +690,7 @@ fn recover_jmp_with_thread_cb(hook: &HookPoint) -> Result<(), HookError> {
     Ok(())
 }
 
+#[cfg(target_arch = "x86")]
 mod tests {
     #[allow(unused_imports)]
     use super::*;

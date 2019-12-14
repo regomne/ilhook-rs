@@ -1,7 +1,7 @@
 [package]
 name = "ilhook"
 description = "A library that provides methods to inline hook binary codes in x86 and x86_64 architecture"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["fallingsunz <fallingsunz@gmail.com>"]
 edition = "2018"
 license = "MIT"
