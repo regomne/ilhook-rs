@@ -5,6 +5,9 @@ matrix:
     - rust: stable
     - rust: beta
     - rust: nightly
+script:
+    - cargo build --verbose
+    - cargo test --verbose --test-thread=1
 branches:
   only:
     - master
