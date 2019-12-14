@@ -4,11 +4,12 @@ cache: cargo
 matrix:
   include:
     - rust: stable
-      env: TARGET=i686-pc-windows-msvc
+      env: TOOLCHAIN=stable-i686-pc-windows-msvc
       os: windows
     - rust: stable
-      env: TARGET=i686-pc-linux-gnu
+      env: TOOLCHAIN=stable-i686-pc-linux-gnu
       os: linux
+install: rustup default ${TOOLCHAIN}
 script:
     - cargo build --verbose
     - cargo test -- --test-threads=1
