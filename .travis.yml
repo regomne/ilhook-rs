@@ -9,6 +9,11 @@ matrix:
     - rust: stable
       env: TARGET=i686-unknown-linux-gnu
       os: linux
+      dist: trusty
+      addons:
+          apt:
+              packages:
+                  - libc6:i386
 install: rustup target add ${TARGET}
 script:
     - cargo build --verbose --target=${TARGET}
