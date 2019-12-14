@@ -1,6 +1,9 @@
 ilhook
 ----
 
+[![Build status](https://travis-ci.org/regomne/ilhook-rs.svg?branch=master)](https://travis-ci.org/regomne/ilhook-rs)
+[![](http://meritbadge.herokuapp.com/ilhook)](https://crates.io/crates/ilhook)
+
 This crate provides methods to inline hook binary codes in `x86` and `x86_64` architecture.
 
 HOOK is a mechanism that intercepts function calls and handles them by user-defined code.
