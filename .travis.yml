@@ -3,11 +3,10 @@ matrix:
   include:
     - rust: 1.36.0
     - rust: stable
-    - rust: beta
     - rust: nightly
 script:
     - cargo build --verbose
-    - cargo test --verbose --test-thread=1
+    - cargo test --verbose --test-threads=1
 branches:
   only:
     - master
