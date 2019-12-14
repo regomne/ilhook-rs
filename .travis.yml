@@ -14,6 +14,9 @@ matrix:
           apt:
               packages:
                   - libc6-dev-i386
+                  - libc6:i386
+                  - libstdc++6:i386
+                  - g++-multilib
 install: rustup target add ${TARGET}
 script:
     - cargo build --verbose --target=${TARGET}
