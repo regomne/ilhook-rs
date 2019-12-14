@@ -861,12 +861,12 @@ mod tests {
     }
 
     #[cfg(test)]
-    extern "system" fn foo2(x: u32) -> u32 {
+    extern "stdcall" fn foo2(x: u32) -> u32 {
         x * x
     }
     #[cfg(test)]
     unsafe extern "C" fn on_foo2(reg: *mut Registers, old_func: usize, _: usize) -> usize {
-        let old_func = std::mem::transmute::<usize, extern "system" fn(u32) -> u32>(old_func);
+        let old_func = std::mem::transmute::<usize, extern "stdcall" fn(u32) -> u32>(old_func);
         old_func((*reg).get_arg(1)) as usize + 3
     }
     #[test]
