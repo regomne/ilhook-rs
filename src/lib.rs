@@ -141,5 +141,5 @@ mod err;
 pub use err::HookError;
 
 /// The x86 hooker
-#[cfg(target_arch = "x86")]
+//#[cfg(target_arch = "x86")]
 pub mod x86;
