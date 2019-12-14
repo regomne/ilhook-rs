@@ -9,7 +9,7 @@ matrix:
     - rust: stable
       env: TARGET=i686-unknown-linux-gnu
       os: linux
-install: rustup target add ${TOOLCHAIN}
+install: rustup target add ${TARGET}
 script:
     - cargo build --verbose --target=${TARGET}
     - cargo test --verbose --target=${TARGET} -- --test-threads=1
