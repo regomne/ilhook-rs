@@ -21,15 +21,22 @@ const JMP_INST_SIZE: usize = 5;
 /// The routine used in a `jmp-back hook`, which means the EIP will jump back to the
 /// original position after the Routine being run.
 ///
-/// The 1st argument is the registers, and the 2nd argument is the HookSrcAddress
+/// # Arguments
+/// 
+/// * regs - The registers
+/// * src_addr - The address that has been hooked
 pub type JmpBackRoutine = unsafe extern "C" fn(regs: *mut Registers, src_addr: usize);
 
 /// The routine used in a `function hook`, which means the Routine will replace the
 /// original FUNCTION, and the EIP will `retn` directly instead of jumping back.
 /// Note that the being-hooked address must be the head of a function.
 ///
-/// The 1st argument is the registers, the 2nd argument is the OriginalFunctionRoutine,
-/// and the 3rd argument is the HookSrcAddress.
+/// # Arguments
+/// 
+/// * regs - The registers
+/// * ori_func_ptr - Original function pointer. Call it after converted to the original function type.
+/// * src_addr - The address that has been hooked
+/// 
 /// Return the new return value of the replaced function.
 pub type RetnRoutine =
     unsafe extern "C" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
@@ -37,16 +44,24 @@ pub type RetnRoutine =
 /// The routine used in a `jmp-addr hook`, which means the EIP will jump to the specified
 /// address after the Routine being run.
 ///
-/// The 1st argument is the registers, the 2nd argument is the OriginalFunctionRoutine,
-/// and the 3rd argument is the HookSrcAddress.
+/// # Arguments
+/// 
+/// * regs - The registers
+/// * ori_func_ptr - Original function pointer. Call it after converted to the original function type.
+/// * src_addr - The address that has been hooked
 pub type JmpToAddrRoutine =
     unsafe extern "C" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize);
 
 /// The routine used in a `jmp-ret hook`, which means the EIP will jump to the return
 /// value of the Routine.
 ///
-/// The 1st argument is the registers, the 2nd argument is the OriginalFunctionRoutine,
-/// and the 3rd argument is the HookSrcAddress. Return the address you want to go to.
+/// # Arguments
+/// 
+/// * regs - The registers
+/// * ori_func_ptr - Original function pointer. Call it after converted to the original function type.
+/// * src_addr - The address that has been hooked
+/// 
+/// Return the address you want to jump to.
 pub type JmpToRetRoutine =
     unsafe extern "C" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
 
