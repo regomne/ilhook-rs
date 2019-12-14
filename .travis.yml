@@ -7,7 +7,7 @@ matrix:
       env: TOOLCHAIN=stable-i686-pc-windows-msvc
       os: windows
     - rust: stable
-      env: TOOLCHAIN=stable-i686-pc-linux-gnu
+      env: TOOLCHAIN=stable-i686-unknown-linux-gnu
       os: linux
 install: rustup default ${TOOLCHAIN}
 script:
