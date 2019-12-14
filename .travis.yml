@@ -1,0 +1,10 @@
+language: rust
+matrix:
+  include:
+    - rust: 1.36.0
+    - rust: stable
+    - rust: beta
+    - rust: nightly
+branches:
+  only:
+    - master

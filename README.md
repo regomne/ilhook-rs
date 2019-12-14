@@ -65,13 +65,22 @@ Now let's start:
 ```rust
 use ilhook::x86::{Hooker, HookType, Registers, CallbackOption, HookFlags};
 
-unsafe extern "C" fn on_check_sn(reg:*mut Registers, _:usize){
-    println!("machine_hash: {}, sn_hash: {}", (*reg).ebx, (*reg).eax);
+unsafe extern "C" fn on_check_sn(
+    reg: *mut Registers,
+    _: usize
+) {
+    println!("m_hash: {}, sn_hash: {}", (*reg).ebx, (*reg).eax);
     (*reg).eax = (*reg).ebx; //we modify the sn_hash!
 }
 
-let hooker=Hooker::new(0x40107F, HookType::JmpBack(on_check_sn), CallbackOption::None, HookFlags::empty());
-//hooker.hook().unwrap(); //commented as hooking is not supported in doc tests
+let hooker = Hooker::new(
+    0x40107F,
+    HookType::JmpBack(on_check_sn),
+    CallbackOption::None,
+    HookFlags::empty(),
+);
+//commented as hooking is not supported in doc tests
+//hooker.hook().unwrap();
 ```
 
 Then check_serial_number will always go to the successful path.
@@ -96,18 +105,24 @@ And you want to let it return `x*x+3`, which means foo(5)==28.
 Now let's hook:
 
 ```rust
-# use ilhook::x86::{Hooker, HookType, Registers, CallbackOption, HookFlags};
-# fn foo(x: u32) -> u32 {
-#     x * x
-# }
-unsafe extern "C" fn new_foo(reg:*mut Registers, _:usize, _:usize)->usize{
+unsafe extern "C" fn new_foo(
+    reg: *mut Registers,
+    _ :usize,
+    _ :usize
+) -> usize {
     let x = (*reg).get_arg(1) as usize;
-    x*x+3
+    x * x + 3
 }
 
-let hooker=Hooker::new(foo as usize, HookType::Retn(0, new_foo), CallbackOption::None, HookFlags::empty());
-unsafe{hooker.hook().unwrap()};
-//assert_eq!(foo(5), 28); //commented as hooking is not supported in doc tests
+let hooker = Hooker::new(
+    foo as usize,
+    HookType::Retn(0, new_foo),
+    CallbackOption::None,
+    HookFlags::empty(),
+);
+unsafe { hooker.hook().unwrap() };
+//commented as hooking is not supported in doc tests
+//assert_eq!(foo(5), 28);
 ```
 
 ## Jmp-addr hook
@@ -130,4 +145,3 @@ This crate is not thread-safe if you don't specify HookFlags::NOT_MODIFY_MEMORY_
 you need to modify memory protection of the destination address by yourself if you specify that.
 
 As rust's test run parrallelly, it may crash if not specify `--test-threads=1`.
-

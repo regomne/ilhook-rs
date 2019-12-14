@@ -176,7 +176,7 @@ impl Hooker {
     /// * `addr` - The being-hooked address.
     /// * `hook_type` - The hook type and callback routine.
     /// * `thread_cb` - The callbacks before and after hooking.
-    /// * `need_modify_protect` - Whether it should modify the memory protect when modifying addr. Usually be true.
+    /// * `flags` - Hook flags
     pub fn new(
         addr: usize,
         hook_type: HookType,
@@ -199,9 +199,9 @@ impl Hooker {
     ///
     /// 1. addr is not a accessible memory address.
     /// 2. addr points to an incorrect position. (At the middle of an instruction, or where after it other instructions may jump)
-    /// 3. Wrong Retn-val if hook_type is HookType::Retn. i.e. A cdecl function with non-zero retn-val, or a stdcall function with wrong retn-val.
-    /// 4. need_modify_protect is false where it should be true.
-    /// 5. hook or unhook from 2 or more threads at the same time without HookFlags::NOT_MODIFY_MEMORY_PROTECT. Because of memory protection colliding.
+    /// 3. Wrong Retn-val if hook_type is `HookType::Retn`. i.e. A `cdecl` function with non-zero retn-val, or a `stdcall` function with wrong retn-val.
+    /// 4. Set `NOT_MODIFY_MEMORY_PROTECT` where it should not be set.
+    /// 5. hook or unhook from 2 or more threads at the same time without `HookFlags::NOT_MODIFY_MEMORY_PROTECT`. Because of memory protection colliding.
     /// 6. Other unpredictable errors.
     pub unsafe fn hook(self) -> Result<HookPoint, HookError> {
         let (moved, origin) = generate_moved_code(self.addr)?;
