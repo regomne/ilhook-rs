@@ -13,7 +13,7 @@ matrix:
       addons:
           apt:
               packages:
-                  - libc6:i386
+                  - libc6-dev-i386
 install: rustup target add ${TARGET}
 script:
     - cargo build --verbose --target=${TARGET}
