@@ -2,7 +2,7 @@
 name = "ilhook"
 description = "A library that provides methods to inline hook binary codes in x86 and x86_64 architecture"
 version = "0.1.2"
-authors = ["fallingsunz <fallingsunz@gmail.com>"]
+authors = ["regomne <fallingsunz@gmail.com>"]
 edition = "2018"
 license = "MIT"
 readme = "README.md"
