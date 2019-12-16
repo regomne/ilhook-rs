@@ -143,3 +143,7 @@ pub use err::HookError;
 /// The x86 hooker
 //#[cfg(target_arch = "x86")]
 pub mod x86;
+
+/// The x64 hooker
+//#[cfg(target_arch = "x86_64")]
+pub mod x64;
