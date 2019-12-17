@@ -22,7 +22,7 @@ const JMP_INST_SIZE: usize = 5;
 /// original position after the Routine being run.
 ///
 /// # Arguments
-/// 
+///
 /// * regs - The registers
 /// * src_addr - The address that has been hooked
 pub type JmpBackRoutine = unsafe extern "C" fn(regs: *mut Registers, src_addr: usize);
@@ -32,11 +32,11 @@ pub type JmpBackRoutine = unsafe extern "C" fn(regs: *mut Registers, src_addr: u
 /// Note that the being-hooked address must be the head of a function.
 ///
 /// # Arguments
-/// 
+///
 /// * regs - The registers
 /// * ori_func_ptr - Original function pointer. Call it after converted to the original function type.
 /// * src_addr - The address that has been hooked
-/// 
+///
 /// Return the new return value of the replaced function.
 pub type RetnRoutine =
     unsafe extern "C" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
@@ -45,7 +45,7 @@ pub type RetnRoutine =
 /// address after the Routine being run.
 ///
 /// # Arguments
-/// 
+///
 /// * regs - The registers
 /// * ori_func_ptr - Original function pointer. Call it after converted to the original function type.
 /// * src_addr - The address that has been hooked
@@ -56,11 +56,11 @@ pub type JmpToAddrRoutine =
 /// value of the Routine.
 ///
 /// # Arguments
-/// 
+///
 /// * regs - The registers
 /// * ori_func_ptr - Original function pointer. Call it after converted to the original function type.
 /// * src_addr - The address that has been hooked
-/// 
+///
 /// Return the address you want to jump to.
 pub type JmpToRetRoutine =
     unsafe extern "C" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
@@ -338,6 +338,8 @@ fn get_jmp_info32(addr: usize, inst: &[u8]) -> Option<i32> {
         0xf if (inst[1] & 0xf0) == 0x80 => Some(p + 6 + read_i32_checked(&inst[2..6])),
         // short jmp
         x if (x == 0xeb) || (x & 0xf0) == 0x70 => Some(p + 2 + inst[1] as i8 as i32),
+        // loopX/jecxz
+        x if x >= 0xe0 && x <= 0xe3 => Some(p + 2 + inst[1] as i8 as i32),
         _ => None,
     }
 }
@@ -360,6 +362,18 @@ fn move_instruction(addr: usize, inst: &[u8], new_inst: &mut Inst) {
                     new_inst.bytes[0] = 0x0f;
                     new_inst.bytes[1] = 0x80 | (x & 0xf);
                     2
+                }
+                // loopX/jecxz
+                x if x >= 0xe0 && x <= 0xe3 => {
+                    // loopX/jecxz @+2
+                    // jmp @+5
+                    // jmp dest_addr
+                    new_inst.bytes[0] = x;
+                    new_inst.bytes[1] = 0x02;
+                    new_inst.bytes[2] = 0xeb;
+                    new_inst.bytes[3] = 0x05;
+                    new_inst.bytes[4] = 0xe9;
+                    5
                 }
                 _ => {
                     new_inst.bytes[0] = inst[0];
@@ -779,6 +793,18 @@ mod tests {
         assert_eq!(new_inst.bytes[2..6], (addr).to_le_bytes());
         assert_eq!(new_inst.len, 6);
         assert_eq!(new_inst.reloc_off, 2);
+    }
+    #[test]
+    fn test_move_inst_7() {
+        // jecxz @+10
+        let inst = [0xe3, 0x02];
+        let mut new_inst: Inst = Default::default();
+        move_instruction(inst.as_ptr() as usize, &inst, &mut new_inst);
+        let addr = inst.as_ptr() as usize as i32;
+        assert_eq!(new_inst.bytes[0..5], [0xe3, 0x02, 0xeb, 0x05, 0xe9]);
+        assert_eq!(new_inst.bytes[5..9], (addr + 4).to_le_bytes());
+        assert_eq!(new_inst.len, 9);
+        assert_eq!(new_inst.reloc_off, 5);
     }
     #[test]
     fn test_relocate_addr() {
