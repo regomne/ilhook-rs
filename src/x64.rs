@@ -81,7 +81,7 @@ pub enum HookType {
 }
 
 /// Jmp type that the `jmp` instruction use.
-pub enum JmpType{
+pub enum JmpType {
     /// Direct long jump. `jmp` instruction use 5 bytes, but may fail as memory allocation near the 2GB space may fail.
     /// `jmp 0xXXXXXXXX`
     Direct,
@@ -242,7 +242,25 @@ impl Hooker {
     /// 4. hook or unhook from 2 or more threads at the same time without `HookFlags::NOT_MODIFY_MEMORY_PROTECT`. Because of memory protection colliding.
     /// 5. Other unpredictable errors.
     pub fn hook(self) -> Result<HookPoint, HookError> {
-        Err(HookError::Unknown)
+        let (moved_code, origin) = generate_moved_code(self.addr)?;
+        let stub = generate_stub(&self, moved_code, origin.len)?;
+        let stub_prot = modify_mem_protect(stub.as_ptr() as usize, stub.len())?;
+        if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
+            let old_prot = modify_mem_protect(self.addr, JMP_INST_SIZE)?;
+            let ret = modify_jmp_with_thread_cb(&self, stub.as_ptr() as usize);
+            recover_mem_protect(self.addr, JMP_INST_SIZE, old_prot);
+            ret?;
+        } else {
+            modify_jmp_with_thread_cb(&self, stub.as_ptr() as usize)?;
+        }
+        Ok(HookPoint {
+            addr: self.addr,
+            stub,
+            stub_prot,
+            origin,
+            thread_cb: self.thread_cb,
+            flags: self.flags,
+        })
     }
 }
 
@@ -253,7 +271,16 @@ impl HookPoint {
     }
 
     fn unhook_by_ref(&self) -> Result<(), HookError> {
-        Err(HookError::Unknown)
+        let ret: Result<(), HookError>;
+        if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
+            let old_prot = modify_mem_protect(self.addr, JMP_INST_SIZE)?;
+            ret = recover_jmp_with_thread_cb(&self);
+            recover_mem_protect(self.addr, JMP_INST_SIZE, old_prot);
+        } else {
+            ret = recover_jmp_with_thread_cb(&self)
+        }
+        recover_mem_protect(self.stub.as_ptr() as usize, self.stub.len(), self.stub_prot);
+        ret
     }
 }
 
@@ -262,4 +289,80 @@ impl Drop for HookPoint {
     fn drop(&mut self) {
         self.unhook_by_ref().unwrap_or_default();
     }
+}
+
+#[derive(Default)]
+struct Inst {
+    bytes: [u8; MAX_INST_LEN],
+    len: u8,
+    reloc_off: u8,
+}
+
+#[derive(Default)]
+struct MovedCode {
+    code_cnt: usize,
+    code: [Inst; 5],
+}
+
+fn generate_moved_code(addr: usize) -> Result<(MovedCode, OriginalCode), HookError> {
+    Err(HookError::Unknown)
+}
+
+fn generate_stub(
+    hooker: &Hooker,
+    moved_code: MovedCode,
+    ori_len: u8,
+) -> Result<Pin<Box<[u8]>>, HookError> {
+    Err(HookError::Unknown)
+}
+
+#[cfg(windows)]
+fn modify_mem_protect(addr: usize, len: usize) -> Result<u32, HookError> {
+    Err(HookError::Unknown)
+}
+
+#[cfg(windows)]
+fn recover_mem_protect(addr: usize, len: usize, old: u32) {}
+
+fn modify_jmp(dest_addr: usize, stub_addr: usize) -> Result<(), HookError> {
+    let buf = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, JMP_INST_SIZE) };
+    // jmp stub_addr
+    buf[0] = 0xe9;
+    let rel_off = stub_addr as i32 - (dest_addr as i32 + 5);
+    buf.split_at_mut(1)
+        .1
+        .copy_from_slice(&rel_off.to_le_bytes());
+    Ok(())
+}
+
+fn modify_jmp_with_thread_cb(hook: &Hooker, stub_addr: usize) -> Result<(), HookError> {
+    if let CallbackOption::Some(cbs) = &hook.thread_cb {
+        if !cbs.pre() {
+            return Err(HookError::PreHook);
+        }
+        let ret = modify_jmp(hook.addr, stub_addr);
+        cbs.post();
+        ret
+    } else {
+        modify_jmp(hook.addr, stub_addr)
+    }
+}
+
+fn recover_jmp(dest_addr: usize, origin: &[u8]) {
+    let buf = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, origin.len()) };
+    // jmp stub_addr
+    buf.copy_from_slice(origin);
+}
+
+fn recover_jmp_with_thread_cb(hook: &HookPoint) -> Result<(), HookError> {
+    if let CallbackOption::Some(cbs) = &hook.thread_cb {
+        if !cbs.pre() {
+            return Err(HookError::PreHook);
+        }
+        recover_jmp(hook.addr, &hook.origin.buf[..hook.origin.len as usize]);
+        cbs.post();
+    } else {
+        recover_jmp(hook.addr, &hook.origin.buf[..hook.origin.len as usize]);
+    }
+    Ok(())
 }
