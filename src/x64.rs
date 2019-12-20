@@ -1,3 +1,4 @@
+use capstone::arch::x86::X86InsnDetail;
 use capstone::prelude::*;
 use std::io::{Cursor, Write};
 use std::pin::Pin;
@@ -303,9 +304,51 @@ struct MovedCode {
     code_cnt: usize,
     code: [Inst; 5],
 }
+fn move_instruction(addr: usize, inst: &[u8], inst_detail: &X86InsnDetail, new_inst: &mut Inst) {}
 
 fn generate_moved_code(addr: usize) -> Result<(MovedCode, OriginalCode), HookError> {
-    Err(HookError::Unknown)
+    let cs = Capstone::new()
+        .x86()
+        .mode(arch::x86::ArchMode::Mode64)
+        .syntax(arch::x86::ArchSyntax::Intel)
+        .detail(true)
+        .build()
+        .expect("Failed to create Capstone object");
+
+    let mut ret: MovedCode = Default::default();
+    let code_slice =
+        unsafe { slice::from_raw_parts(addr as *const u8, MAX_INST_LEN * JMP_INST_SIZE) };
+    let mut code_idx = 0;
+    let mut inst_idx = 0;
+    while code_idx < JMP_INST_SIZE {
+        let insts = match cs.disasm_count(&code_slice[code_idx..], addr as u64, 1) {
+            Ok(i) => i,
+            Err(_) => return Err(HookError::Disassemble),
+        };
+        let inst = insts.iter().nth(0).unwrap();
+        let inst_detail = cs.insn_detail(&inst).unwrap();
+        if let ArchDetail::X86Detail(arch_detail) = inst_detail.arch_detail() {
+            move_instruction(
+                addr + code_idx,
+                inst.bytes(),
+                &arch_detail,
+                &mut ret.code[inst_idx],
+            );
+        } else {
+            return Err(HookError::Unknown);
+        }
+        code_idx += inst.bytes().len();
+        inst_idx += 1;
+    }
+    ret.code_cnt = inst_idx;
+    let mut origin: OriginalCode = Default::default();
+    origin.len = code_idx as u8;
+    origin
+        .buf
+        .split_at_mut(code_idx)
+        .0
+        .copy_from_slice(&code_slice[..code_idx]);
+    Ok((ret, origin))
 }
 
 fn generate_stub(
