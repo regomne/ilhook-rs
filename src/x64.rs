@@ -1,4 +1,5 @@
-use capstone::arch::x86::X86InsnDetail;
+use capstone::arch::x86::{X86InsnDetail, X86OperandType};
+use capstone::arch::ArchOperand;
 use capstone::prelude::*;
 use std::io::{Cursor, Write};
 use std::pin::Pin;
@@ -304,7 +305,50 @@ struct MovedCode {
     code_cnt: usize,
     code: [Inst; 5],
 }
-fn move_instruction(addr: usize, inst: &[u8], inst_detail: &X86InsnDetail, new_inst: &mut Inst) {}
+fn read_i32_checked(buf: &[u8]) -> i32 {
+    i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
+}
+fn move_instruction(addr: usize, inst: &[u8], inst_detail: &InsnDetail, new_inst: &mut Inst) {
+    let arch_detail = inst_detail.arch_detail();
+    if let ArchDetail::X86Detail(x86) = arch_detail {
+        let op1 = x86.opcode()[0];
+        let op2 = x86.opcode()[1];
+        let addr = match op1 {
+            x if (x & 0xf0) == 0x70 => {
+                new_inst.bytes[0] = 0x0f;
+                new_inst.bytes[1] = 0x80 | (x & 0xf);
+                2
+            }
+            _ => 0,
+        };
+    } else {
+        panic!("Unexpected");
+    }
+}
+
+fn copy_rip_inst(addr: usize, inst: &[u8], inst_detail: &ArchDetail, new_inst: &mut Inst) {
+    let ops = inst_detail.operands();
+    let mut disp: Option<i32> = None;
+    for op in ops {
+        if let ArchOperand::X86Operand(x86) = op {
+            if let X86OperandType::Mem(op_mem) = x86.op_type {
+                disp = Some(op_mem.disp() as i32);
+                break;
+            }
+        }
+    }
+    let disp = disp.unwrap_or_else(|| panic!("unknown instruction"));
+    let mut i = 2;
+    while i <= inst.len() - 4 {
+        if disp == read_i32_checked(&inst[i..]) {
+            break;
+        }
+        i += 1;
+    }
+    if i > inst.len() - 4 {
+        panic!("unknown error");
+    }
+}
 
 fn generate_moved_code(addr: usize) -> Result<(MovedCode, OriginalCode), HookError> {
     let cs = Capstone::new()
@@ -327,16 +371,12 @@ fn generate_moved_code(addr: usize) -> Result<(MovedCode, OriginalCode), HookErr
         };
         let inst = insts.iter().nth(0).unwrap();
         let inst_detail = cs.insn_detail(&inst).unwrap();
-        if let ArchDetail::X86Detail(arch_detail) = inst_detail.arch_detail() {
-            move_instruction(
-                addr + code_idx,
-                inst.bytes(),
-                &arch_detail,
-                &mut ret.code[inst_idx],
-            );
-        } else {
-            return Err(HookError::Unknown);
-        }
+        move_instruction(
+            addr + code_idx,
+            inst.bytes(),
+            &inst_detail,
+            &mut ret.code[inst_idx],
+        );
         code_idx += inst.bytes().len();
         inst_idx += 1;
     }
