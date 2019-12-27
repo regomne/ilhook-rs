@@ -381,22 +381,12 @@ fn move_instruction(addr: usize, inst: &[u8], new_inst: &mut Inst) {
                     2
                 }
             };
-            new_inst
-                .bytes
-                .split_at_mut(addr_idx + 4)
-                .0
-                .split_at_mut(addr_idx)
-                .1
-                .copy_from_slice(&dest_addr.to_le_bytes());
+            new_inst.bytes[addr_idx..addr_idx+4].copy_from_slice(&dest_addr.to_le_bytes());
             new_inst.len = (addr_idx + 4) as u8;
             new_inst.reloc_off = addr_idx as u8;
         }
         None => {
-            new_inst
-                .bytes
-                .split_at_mut(inst.len())
-                .0
-                .copy_from_slice(inst);
+            new_inst.bytes[..inst.len()].copy_from_slice(inst);
             new_inst.len = inst.len() as u8;
         }
     }
@@ -429,11 +419,7 @@ fn generate_moved_code(addr: usize) -> Result<(MovedCode, OriginalCode), HookErr
     ret.code_cnt = inst_idx;
     let mut origin: OriginalCode = Default::default();
     origin.len = code_idx as u8;
-    origin
-        .buf
-        .split_at_mut(code_idx)
-        .0
-        .copy_from_slice(&code_slice[..code_idx]);
+    origin.buf[..code_idx].copy_from_slice(&code_slice[..code_idx]);
     Ok((ret, origin))
 }
 
@@ -460,20 +446,12 @@ fn relocate_addr(buf: Pin<&mut [u8]>, rel_tbl: Vec<u8>, addr_to_write: u8, moved
         let off = *off as usize;
         let dest_addr = read_i32_checked(&buf[off..off + 4]);
         let relative_addr = dest_addr - (buf_addr as i32 + off as i32 + 4);
-        buf.split_at_mut(off + 4)
-            .0
-            .split_at_mut(off)
-            .1
-            .copy_from_slice(&relative_addr.to_le_bytes());
+        buf[off..off+4].copy_from_slice(&relative_addr.to_le_bytes());
     });
 
     if addr_to_write != 0 {
         let addr_to_write = addr_to_write as usize;
-        buf.split_at_mut(addr_to_write + 4)
-            .0
-            .split_at_mut(addr_to_write)
-            .1
-            .copy_from_slice(&(buf_addr + moved_code_off as u32).to_le_bytes());
+        buf[addr_to_write..addr_to_write+4].copy_from_slice(&(buf_addr + moved_code_off as u32).to_le_bytes());
     }
 }
 
@@ -681,9 +659,7 @@ fn modify_jmp(dest_addr: usize, stub_addr: usize) -> Result<(), HookError> {
     // jmp stub_addr
     buf[0] = 0xe9;
     let rel_off = stub_addr as i32 - (dest_addr as i32 + 5);
-    buf.split_at_mut(1)
-        .1
-        .copy_from_slice(&rel_off.to_le_bytes());
+    buf[1..5].copy_from_slice(&rel_off.to_le_bytes());
     Ok(())
 }
 
