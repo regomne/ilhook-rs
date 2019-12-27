@@ -298,6 +298,7 @@ struct Inst {
     bytes: [u8; MAX_INST_LEN],
     len: u8,
     reloc_off: u8,
+    reloc_addr:u64,
 }
 
 #[derive(Default)]
@@ -305,6 +306,7 @@ struct MovedCode {
     code_cnt: usize,
     code: [Inst; 5],
 }
+type RelocTable=Vec<(u8,i64)>;
 fn read_i32_checked(buf: &[u8]) -> i32 {
     i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
 }
@@ -326,6 +328,10 @@ fn move_instruction(addr: usize, inst: &[u8], inst_detail: &InsnDetail, new_inst
     }
 }
 
+fn copy_mut_slice(b:&mut [u8], src:&[u8]){
+    b.copy_from_slice(src)
+}
+
 fn copy_rip_inst(addr: usize, inst: &[u8], inst_detail: &ArchDetail, new_inst: &mut Inst) {
     let ops = inst_detail.operands();
     let mut disp: Option<i32> = None;
@@ -338,6 +344,7 @@ fn copy_rip_inst(addr: usize, inst: &[u8], inst_detail: &ArchDetail, new_inst: &
         }
     }
     let disp = disp.unwrap_or_else(|| panic!("unknown instruction"));
+    let dest_addr=addr as i64+inst.len() as i64+disp as i64;
     let mut i = 2;
     while i <= inst.len() - 4 {
         if disp == read_i32_checked(&inst[i..]) {
@@ -348,6 +355,8 @@ fn copy_rip_inst(addr: usize, inst: &[u8], inst_detail: &ArchDetail, new_inst: &
     if i > inst.len() - 4 {
         panic!("unknown error");
     }
+    copy_mut_slice(&mut new_inst.bytes[0..i+4], &inst[0..i]);
+    new_inst.bytes[i+4..inst.len()-i-4].copy_from_slice(&inst[0..i]);
 }
 
 fn generate_moved_code(addr: usize) -> Result<(MovedCode, OriginalCode), HookError> {
