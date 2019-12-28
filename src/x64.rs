@@ -298,41 +298,68 @@ struct Inst {
     bytes: [u8; MAX_INST_LEN],
     len: u8,
     reloc_off: u8,
-    reloc_addr:u64,
+    reloc_addr: u64,
 }
 
-#[derive(Default)]
-struct MovedCode {
-    code_cnt: usize,
-    code: [Inst; 5],
-}
-type RelocTable=Vec<(u8,i64)>;
-fn read_i32_checked(buf: &[u8]) -> i32 {
-    i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
-}
-fn move_instruction(addr: usize, inst: &[u8], inst_detail: &InsnDetail, new_inst: &mut Inst) {
-    let arch_detail = inst_detail.arch_detail();
-    if let ArchDetail::X86Detail(x86) = arch_detail {
-        let op1 = x86.opcode()[0];
-        let op2 = x86.opcode()[1];
-        let addr = match op1 {
-            x if (x & 0xf0) == 0x70 => {
-                new_inst.bytes[0] = 0x0f;
-                new_inst.bytes[1] = 0x80 | (x & 0xf);
-                2
-            }
-            _ => 0,
+impl Inst {
+    fn new(bytes: &[u8], reloc_off: u8, reloc_addr: u64) -> Self {
+        let mut s = Self {
+            bytes: [0; MAX_INST_LEN],
+            len: bytes.len() as u8,
+            reloc_off,
+            reloc_addr,
         };
-    } else {
-        panic!("Unexpected");
+        if bytes.len() > MAX_INST_LEN {
+            panic!("inst len error");
+        }
+        s.bytes[..bytes.len()].copy_from_slice(bytes);
+        s
     }
 }
 
-fn copy_mut_slice(b:&mut [u8], src:&[u8]){
-    b.copy_from_slice(src)
+type RelocTable = Vec<(u8, i64)>;
+fn read_i32_checked(buf: &[u8]) -> i32 {
+    i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
 }
 
-fn copy_rip_inst(addr: usize, inst: &[u8], inst_detail: &ArchDetail, new_inst: &mut Inst) {
+fn get_jmp_dest_from_inst(detail: &ArchDetail) -> u64 {
+    let ops = detail.operands();
+    assert_eq!(ops.len(), 1);
+    if let ArchOperand::X86Operand(op) = &ops[0] {
+        if let X86OperandType::Imm(v) = op.op_type {
+            v as u64
+        } else {
+            panic!("not jmp?")
+        }
+    } else {
+        panic!("not jmp?")
+    }
+}
+
+fn move_instruction(addr: usize, inst: &[u8], inst_detail: &InsnDetail) -> Inst {
+    let arch_detail = inst_detail.arch_detail();
+    let x86 = arch_detail.x86().unwrap();
+    let op1 = x86.opcode()[0];
+    let op2 = x86.opcode()[1];
+    match op1 {
+        x if (x & 0xf0) == 0x70 => Inst::new(
+            &[0x0f, 0x80 | (x & 0xf), 0, 0, 0, 0],
+            2,
+            get_jmp_dest_from_inst(&arch_detail),
+        ),
+        0x0f if (op2 & 0xf0) == 0x80 => Inst::new(
+            &[0x0f, op2, 0, 0, 0, 0],
+            2,
+            get_jmp_dest_from_inst(&arch_detail),
+        ),
+        0xeb | 0xe9 => Inst::new(&[0xe9, 0, 0, 0, 0], 1, get_jmp_dest_from_inst(&arch_detail)),
+        0xe8 => Inst::new(&[0xe8, 0, 0, 0, 0], 1, get_jmp_dest_from_inst(&arch_detail)),
+        _ if x86.modrm() == 5 => copy_rip_inst(addr, inst, &arch_detail),
+        _ => Inst::new(inst, 0, 0),
+    }
+}
+
+fn copy_rip_inst(addr: usize, inst: &[u8], inst_detail: &ArchDetail) -> Inst {
     let ops = inst_detail.operands();
     let mut disp: Option<i32> = None;
     for op in ops {
@@ -344,7 +371,7 @@ fn copy_rip_inst(addr: usize, inst: &[u8], inst_detail: &ArchDetail, new_inst: &
         }
     }
     let disp = disp.unwrap_or_else(|| panic!("unknown instruction"));
-    let dest_addr=addr as i64+inst.len() as i64+disp as i64;
+    let dest_addr = addr as i64 + inst.len() as i64 + disp as i64;
     let mut i = 2;
     while i <= inst.len() - 4 {
         if disp == read_i32_checked(&inst[i..]) {
@@ -355,11 +382,10 @@ fn copy_rip_inst(addr: usize, inst: &[u8], inst_detail: &ArchDetail, new_inst: &
     if i > inst.len() - 4 {
         panic!("unknown error");
     }
-    copy_mut_slice(&mut new_inst.bytes[0..i+4], &inst[0..i]);
-    new_inst.bytes[i+4..inst.len()-i-4].copy_from_slice(&inst[0..i]);
+    Inst::new(inst, i as u8, dest_addr as u64)
 }
 
-fn generate_moved_code(addr: usize) -> Result<(MovedCode, OriginalCode), HookError> {
+fn generate_moved_code(addr: usize) -> Result<(Vec<Inst>, OriginalCode), HookError> {
     let cs = Capstone::new()
         .x86()
         .mode(arch::x86::ArchMode::Mode64)
@@ -368,11 +394,11 @@ fn generate_moved_code(addr: usize) -> Result<(MovedCode, OriginalCode), HookErr
         .build()
         .expect("Failed to create Capstone object");
 
-    let mut ret: MovedCode = Default::default();
     let code_slice =
         unsafe { slice::from_raw_parts(addr as *const u8, MAX_INST_LEN * JMP_INST_SIZE) };
     let mut code_idx = 0;
-    let mut inst_idx = 0;
+
+    let mut ret: Vec<Inst> = vec![];
     while code_idx < JMP_INST_SIZE {
         let insts = match cs.disasm_count(&code_slice[code_idx..], addr as u64, 1) {
             Ok(i) => i,
@@ -380,29 +406,23 @@ fn generate_moved_code(addr: usize) -> Result<(MovedCode, OriginalCode), HookErr
         };
         let inst = insts.iter().nth(0).unwrap();
         let inst_detail = cs.insn_detail(&inst).unwrap();
-        move_instruction(
+
+        ret.push(move_instruction(
             addr + code_idx,
             inst.bytes(),
             &inst_detail,
-            &mut ret.code[inst_idx],
-        );
+        ));
         code_idx += inst.bytes().len();
-        inst_idx += 1;
     }
-    ret.code_cnt = inst_idx;
     let mut origin: OriginalCode = Default::default();
     origin.len = code_idx as u8;
-    origin
-        .buf
-        .split_at_mut(code_idx)
-        .0
-        .copy_from_slice(&code_slice[..code_idx]);
+    origin.buf[..code_idx].copy_from_slice(&code_slice[..code_idx]);
     Ok((ret, origin))
 }
 
 fn generate_stub(
     hooker: &Hooker,
-    moved_code: MovedCode,
+    moved_code: Vec<Inst>,
     ori_len: u8,
 ) -> Result<Pin<Box<[u8]>>, HookError> {
     Err(HookError::Unknown)
