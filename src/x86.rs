@@ -1,3 +1,5 @@
+use capstone::arch::x86::X86OperandType;
+use capstone::arch::ArchOperand;
 use capstone::prelude::*;
 use std::io::{Cursor, Write};
 use std::pin::Pin;
@@ -159,12 +161,23 @@ struct Inst {
     bytes: [u8; MAX_INST_LEN],
     len: u8,
     reloc_off: u8,
+    reloc_addr: u32,
 }
 
-#[derive(Default)]
-struct MovedCode {
-    code_cnt: usize,
-    code: [Inst; 5],
+impl Inst {
+    fn new(bytes: &[u8], reloc_off: u8, reloc_addr: u32) -> Self {
+        let mut s = Self {
+            bytes: [0; MAX_INST_LEN],
+            len: bytes.len() as u8,
+            reloc_off,
+            reloc_addr,
+        };
+        if bytes.len() > MAX_INST_LEN {
+            panic!("bytes too long")
+        }
+        s.bytes[..bytes.len()].copy_from_slice(bytes);
+        s
+    }
 }
 
 #[derive(Default)]
@@ -343,88 +356,76 @@ fn get_jmp_info32(addr: usize, inst: &[u8]) -> Option<i32> {
         _ => None,
     }
 }
-fn move_instruction(addr: usize, inst: &[u8], new_inst: &mut Inst) {
-    match get_jmp_info32(addr, inst) {
-        Some(dest_addr) => {
-            let addr_idx = match inst[0] {
-                // jXX without condition
-                0xeb | 0xe9 => {
-                    new_inst.bytes[0] = 0xe9;
-                    1
-                }
-                // call
-                0xe8 => {
-                    new_inst.bytes[0] = 0xe8;
-                    1
-                }
-                // jXX with condition
-                x if (x & 0xf0) == 0x70 => {
-                    new_inst.bytes[0] = 0x0f;
-                    new_inst.bytes[1] = 0x80 | (x & 0xf);
-                    2
-                }
-                // loopX/jecxz
-                x if x >= 0xe0 && x <= 0xe3 => {
-                    // loopX/jecxz @+2
-                    // jmp @+5
-                    // jmp dest_addr
-                    new_inst.bytes[0] = x;
-                    new_inst.bytes[1] = 0x02;
-                    new_inst.bytes[2] = 0xeb;
-                    new_inst.bytes[3] = 0x05;
-                    new_inst.bytes[4] = 0xe9;
-                    5
-                }
-                _ => {
-                    new_inst.bytes[0] = inst[0];
-                    new_inst.bytes[1] = inst[1];
-                    2
-                }
-            };
-            new_inst.bytes[addr_idx..addr_idx+4].copy_from_slice(&dest_addr.to_le_bytes());
-            new_inst.len = (addr_idx + 4) as u8;
-            new_inst.reloc_off = addr_idx as u8;
+fn get_jmp_dest_from_inst(detail: &ArchDetail) -> u32 {
+    let ops = detail.operands();
+    assert_eq!(ops.len(), 1);
+    if let ArchOperand::X86Operand(op) = &ops[0] {
+        if let X86OperandType::Imm(v) = op.op_type {
+            v as u32
+        } else {
+            panic!("not jmp?")
         }
-        None => {
-            new_inst.bytes[..inst.len()].copy_from_slice(inst);
-            new_inst.len = inst.len() as u8;
-        }
+    } else {
+        panic!("not jmp?")
     }
 }
 
-fn generate_moved_code(addr: usize) -> Result<(MovedCode, OriginalCode), HookError> {
+fn move_instruction(addr: usize, inst: &[u8], arch_detail: &ArchDetail) -> Inst {
+    let x86 = arch_detail.x86().unwrap();
+    let op1 = x86.opcode()[0];
+    let op2 = x86.opcode()[1];
+    match op1 {
+        x if (x & 0xf0) == 0x70 => Inst::new(
+            &[0x0f, 0x80 | (x & 0xf), 0, 0, 0, 0],
+            2,
+            get_jmp_dest_from_inst(&arch_detail),
+        ),
+        0x0f if (op2 & 0xf0) == 0x80 => Inst::new(
+            &[0x0f, op2, 0, 0, 0, 0],
+            2,
+            get_jmp_dest_from_inst(&arch_detail),
+        ),
+        0xeb | 0xe9 => Inst::new(&[0xe9, 0, 0, 0, 0], 1, get_jmp_dest_from_inst(&arch_detail)),
+        0xe8 => Inst::new(&[0xe8, 0, 0, 0, 0], 1, get_jmp_dest_from_inst(&arch_detail)),
+        _ => Inst::new(inst, 0, 0),
+    }
+}
+
+fn generate_moved_code(addr: usize) -> Result<(Vec<Inst>, OriginalCode), HookError> {
     let cs = Capstone::new()
         .x86()
         .mode(arch::x86::ArchMode::Mode32)
         .syntax(arch::x86::ArchSyntax::Intel)
-        .detail(false)
+        .detail(true)
         .build()
         .expect("Failed to create Capstone object");
 
-    let mut ret: MovedCode = Default::default();
+    let mut ret: Vec<Inst> = vec![];
     let code_slice =
         unsafe { slice::from_raw_parts(addr as *const u8, MAX_INST_LEN * JMP_INST_SIZE) };
     let mut code_idx = 0;
-    let mut inst_idx = 0;
     while code_idx < JMP_INST_SIZE {
         let insts = match cs.disasm_count(&code_slice[code_idx..], addr as u64, 1) {
             Ok(i) => i,
             Err(_) => return Err(HookError::Disassemble),
         };
         let inst = insts.iter().nth(0).unwrap();
-        move_instruction(addr + code_idx, inst.bytes(), &mut ret.code[inst_idx]);
+        let detail = cs.insn_detail(&inst).unwrap();
+        ret.push(move_instruction(
+            addr + code_idx,
+            inst.bytes(),
+            &detail.arch_detail(),
+        ));
         code_idx += inst.bytes().len();
-        inst_idx += 1;
     }
-    ret.code_cnt = inst_idx;
     let mut origin: OriginalCode = Default::default();
     origin.len = code_idx as u8;
     origin.buf[..code_idx].copy_from_slice(&code_slice[..code_idx]);
     Ok((ret, origin))
 }
 
-fn write_moved_code_to_buf(code: &MovedCode, buf: &mut Cursor<Vec<u8>>, reloc_tbl: &mut Vec<u8>) {
-    code.code[..code.code_cnt].iter().for_each(|inst| {
+fn write_moved_code_to_buf(code: &Vec<Inst>, buf: &mut Cursor<Vec<u8>>, reloc_tbl: &mut Vec<u8>) {
+    code.iter().for_each(|inst| {
         if inst.reloc_off != 0 {
             reloc_tbl.push(buf.position() as u8 + inst.reloc_off);
         }
@@ -446,19 +447,20 @@ fn relocate_addr(buf: Pin<&mut [u8]>, rel_tbl: Vec<u8>, addr_to_write: u8, moved
         let off = *off as usize;
         let dest_addr = read_i32_checked(&buf[off..off + 4]);
         let relative_addr = dest_addr - (buf_addr as i32 + off as i32 + 4);
-        buf[off..off+4].copy_from_slice(&relative_addr.to_le_bytes());
+        buf[off..off + 4].copy_from_slice(&relative_addr.to_le_bytes());
     });
 
     if addr_to_write != 0 {
         let addr_to_write = addr_to_write as usize;
-        buf[addr_to_write..addr_to_write+4].copy_from_slice(&(buf_addr + moved_code_off as u32).to_le_bytes());
+        buf[addr_to_write..addr_to_write + 4]
+            .copy_from_slice(&(buf_addr + moved_code_off as u32).to_le_bytes());
     }
 }
 
 fn generate_jmp_back_stub(
     buf: &mut Cursor<Vec<u8>>,
     rel_tbl: &mut Vec<u8>,
-    moved_code: &MovedCode,
+    moved_code: &Vec<Inst>,
     ori_addr: usize,
     cb: JmpBackRoutine,
     ori_len: u8,
@@ -487,7 +489,7 @@ fn generate_jmp_back_stub(
 fn generate_retn_stub(
     buf: &mut Cursor<Vec<u8>>,
     rel_tbl: &mut Vec<u8>,
-    moved_code: &MovedCode,
+    moved_code: &Vec<Inst>,
     ori_addr: usize,
     retn_val: u16,
     cb: RetnRoutine,
@@ -530,7 +532,7 @@ fn generate_retn_stub(
 fn generate_jmp_addr_stub(
     buf: &mut Cursor<Vec<u8>>,
     rel_tbl: &mut Vec<u8>,
-    moved_code: &MovedCode,
+    moved_code: &Vec<Inst>,
     ori_addr: usize,
     dest_addr: usize,
     cb: JmpToAddrRoutine,
@@ -566,7 +568,7 @@ fn generate_jmp_addr_stub(
 fn generate_jmp_ret_stub(
     buf: &mut Cursor<Vec<u8>>,
     rel_tbl: &mut Vec<u8>,
-    moved_code: &MovedCode,
+    moved_code: &Vec<Inst>,
     ori_addr: usize,
     cb: JmpToRetRoutine,
     ori_len: u8,
@@ -602,7 +604,7 @@ fn generate_jmp_ret_stub(
 
 fn generate_stub(
     hooker: &Hooker,
-    moved_code: &MovedCode,
+    moved_code: &Vec<Inst>,
     ori_len: u8,
 ) -> Result<Pin<Box<[u8]>>, HookError> {
     let mut rel_tbl = Vec::<u8>::new();
@@ -702,83 +704,154 @@ mod tests {
 
     #[test]
     fn test_move_inst_1() {
+        let cs = Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .syntax(arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()
+            .expect("Failed to create Capstone object");
+
         // jmp eax
         let inst = [0xff, 0xe0];
-        let mut new_inst: Inst = Default::default();
-        move_instruction(inst.as_ptr() as usize, &inst, &mut new_inst);
+        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
+        let inst_info = insts.iter().nth(0).unwrap();
+        let insn_detail = cs.insn_detail(&inst_info).unwrap();
+        let arch_detail = insn_detail.arch_detail();
+        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
         assert_eq!(new_inst.bytes[..2], inst);
         assert_eq!(new_inst.len, 2);
         assert_eq!(new_inst.reloc_off, 0);
     }
     #[test]
     fn test_move_inst_2() {
+        let cs = Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .syntax(arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()
+            .expect("Failed to create Capstone object");
         // jmp @-2
         let inst = [0xeb, 0xfe];
-        let mut new_inst: Inst = Default::default();
-        move_instruction(inst.as_ptr() as usize, &inst, &mut new_inst);
+        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
+        let inst_info = insts.iter().nth(0).unwrap();
+        let insn_detail = cs.insn_detail(&inst_info).unwrap();
+        let arch_detail = insn_detail.arch_detail();
+        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
         let addr = inst.as_ptr() as usize as i32;
         assert_eq!(new_inst.bytes[0], 0xe9);
-        assert_eq!(new_inst.bytes[1..5], (addr + 2 - 2).to_le_bytes());
+        assert_eq!(new_inst.reloc_addr, (addr + 2 - 2) as u32);
         assert_eq!(new_inst.len, 5);
         assert_eq!(new_inst.reloc_off, 1);
     }
     #[test]
     fn test_move_inst_3() {
+        let cs = Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .syntax(arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()
+            .expect("Failed to create Capstone object");
         // jmp @-0x20
         let inst = [0xe9, 0xe0, 0xff, 0xff, 0xff];
-        let mut new_inst: Inst = Default::default();
-        move_instruction(inst.as_ptr() as usize, &inst, &mut new_inst);
+        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
+        let inst_info = insts.iter().nth(0).unwrap();
+        let insn_detail = cs.insn_detail(&inst_info).unwrap();
+        let arch_detail = insn_detail.arch_detail();
+        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
         let addr = inst.as_ptr() as usize as i32;
         assert_eq!(new_inst.bytes[0], 0xe9);
-        assert_eq!(new_inst.bytes[1..5], (addr + 5 - 0x20).to_le_bytes());
+        assert_eq!(new_inst.reloc_addr, (addr + 5 - 0x20) as u32);
         assert_eq!(new_inst.len, 5);
         assert_eq!(new_inst.reloc_off, 1);
     }
     #[test]
     fn test_move_inst_4() {
+        let cs = Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .syntax(arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()
+            .expect("Failed to create Capstone object");
         // call @+10
         let inst = [0xe8, 0xa, 0, 0, 0];
-        let mut new_inst: Inst = Default::default();
-        move_instruction(inst.as_ptr() as usize, &inst, &mut new_inst);
+        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
+        let inst_info = insts.iter().nth(0).unwrap();
+        let insn_detail = cs.insn_detail(&inst_info).unwrap();
+        let arch_detail = insn_detail.arch_detail();
+        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
         let addr = inst.as_ptr() as usize as i32;
         assert_eq!(new_inst.bytes[0], 0xe8);
-        assert_eq!(new_inst.bytes[1..5], (addr + 5 + 10).to_le_bytes());
+        assert_eq!(new_inst.reloc_addr, (addr + 5 + 10) as u32);
         assert_eq!(new_inst.len, 5);
         assert_eq!(new_inst.reloc_off, 1);
     }
     #[test]
     fn test_move_inst_5() {
+        let cs = Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .syntax(arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()
+            .expect("Failed to create Capstone object");
         // jnz @+0
         let inst = [0x75, 0];
-        let mut new_inst: Inst = Default::default();
-        move_instruction(inst.as_ptr() as usize, &inst, &mut new_inst);
+        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
+        let inst_info = insts.iter().nth(0).unwrap();
+        let insn_detail = cs.insn_detail(&inst_info).unwrap();
+        let arch_detail = insn_detail.arch_detail();
+        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
         let addr = inst.as_ptr() as usize as i32;
         assert_eq!(new_inst.bytes[0..2], [0x0f, 0x85]);
-        assert_eq!(new_inst.bytes[2..6], (addr + 2).to_le_bytes());
+        assert_eq!(new_inst.reloc_addr, (addr + 2) as u32);
         assert_eq!(new_inst.len, 6);
         assert_eq!(new_inst.reloc_off, 2);
     }
     #[test]
     fn test_move_inst_6() {
+        let cs = Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .syntax(arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()
+            .expect("Failed to create Capstone object");
         // jnz @-6
         let inst = [0x0f, 0x85, 0xfa, 0xff, 0xff, 0xff];
-        let mut new_inst: Inst = Default::default();
-        move_instruction(inst.as_ptr() as usize, &inst, &mut new_inst);
+        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
+        let inst_info = insts.iter().nth(0).unwrap();
+        let insn_detail = cs.insn_detail(&inst_info).unwrap();
+        let arch_detail = insn_detail.arch_detail();
+        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
         let addr = inst.as_ptr() as usize as i32;
         assert_eq!(new_inst.bytes[0..2], [0x0f, 0x85]);
-        assert_eq!(new_inst.bytes[2..6], (addr).to_le_bytes());
+        assert_eq!(new_inst.reloc_addr, addr as u32);
         assert_eq!(new_inst.len, 6);
         assert_eq!(new_inst.reloc_off, 2);
     }
     #[test]
     fn test_move_inst_7() {
+        let cs = Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .syntax(arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()
+            .expect("Failed to create Capstone object");
         // jecxz @+10
         let inst = [0xe3, 0x02];
-        let mut new_inst: Inst = Default::default();
-        move_instruction(inst.as_ptr() as usize, &inst, &mut new_inst);
+        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
+        let inst_info = insts.iter().nth(0).unwrap();
+        let insn_detail = cs.insn_detail(&inst_info).unwrap();
+        let arch_detail = insn_detail.arch_detail();
+        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
         let addr = inst.as_ptr() as usize as i32;
         assert_eq!(new_inst.bytes[0..5], [0xe3, 0x02, 0xeb, 0x05, 0xe9]);
-        assert_eq!(new_inst.bytes[5..9], (addr + 4).to_le_bytes());
+        assert_eq!(new_inst.reloc_addr, (addr + 4) as u32);
         assert_eq!(new_inst.len, 9);
         assert_eq!(new_inst.reloc_off, 5);
     }
@@ -818,16 +891,13 @@ mod tests {
         let p = Pin::new(b);
         let addr = p.as_ptr() as usize;
         let (moved_code, origin) = generate_moved_code(addr).unwrap();
-        assert_eq!(moved_code.code_cnt, 3);
-        assert_eq!(moved_code.code[0].len, 1);
-        assert_eq!(moved_code.code[1].len, 3);
-        assert_eq!(moved_code.code[2].len, 5);
-        assert_eq!(moved_code.code[2].bytes[0], 0xe8);
-        assert_eq!(
-            moved_code.code[2].bytes[1..5],
-            (addr as u32 + 9).to_le_bytes()
-        );
-        assert_eq!(moved_code.code[2].reloc_off, 1);
+        assert_eq!(moved_code.len(), 3);
+        assert_eq!(moved_code[0].len, 1);
+        assert_eq!(moved_code[1].len, 3);
+        assert_eq!(moved_code[2].len, 5);
+        assert_eq!(moved_code[2].bytes[0], 0xe8);
+        assert_eq!(moved_code[2].bytes[1..5], (addr as u32 + 9).to_le_bytes());
+        assert_eq!(moved_code[2].reloc_off, 1);
         assert_eq!(origin.len, 9);
         assert_eq!(origin.buf[..9], [0x53, 0x83, 0xec, 0x18, 0xe8, 0, 0, 0, 0]);
     }
