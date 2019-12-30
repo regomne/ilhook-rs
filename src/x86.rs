@@ -345,24 +345,6 @@ struct RelocEntry {
     dest_addr: u32,
 }
 
-fn read_i32_checked(buf: &[u8]) -> i32 {
-    i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
-}
-
-fn get_jmp_info32(addr: usize, inst: &[u8]) -> Option<i32> {
-    let p = addr as i32;
-    match inst[0] {
-        // long jmp & call
-        0xe9 | 0xe8 => Some(p + 5 + read_i32_checked(&inst[1..5])),
-        // conditional long jmp
-        0xf if (inst[1] & 0xf0) == 0x80 => Some(p + 6 + read_i32_checked(&inst[2..6])),
-        // short jmp
-        x if (x == 0xeb) || (x & 0xf0) == 0x70 => Some(p + 2 + inst[1] as i8 as i32),
-        // loopX/jecxz
-        x if x >= 0xe0 && x <= 0xe3 => Some(p + 2 + inst[1] as i8 as i32),
-        _ => None,
-    }
-}
 fn get_jmp_dest_from_inst(detail: &ArchDetail) -> u32 {
     let ops = detail.operands();
     assert_eq!(ops.len(), 1);
@@ -377,22 +359,32 @@ fn get_jmp_dest_from_inst(detail: &ArchDetail) -> u32 {
     }
 }
 
-fn move_instruction(addr: usize, inst: &[u8], arch_detail: &ArchDetail) -> Inst {
+fn move_instruction(inst: &[u8], arch_detail: &ArchDetail) -> Inst {
     let x86 = arch_detail.x86().unwrap();
     let op1 = x86.opcode()[0];
     let op2 = x86.opcode()[1];
     match op1 {
+        // short jXX
         x if (x & 0xf0) == 0x70 => Inst::new(
             &[0x0f, 0x80 | (x & 0xf), 0, 0, 0, 0],
             2,
             get_jmp_dest_from_inst(&arch_detail),
         ),
+        // long jXX
         0x0f if (op2 & 0xf0) == 0x80 => Inst::new(
             &[0x0f, op2, 0, 0, 0, 0],
             2,
             get_jmp_dest_from_inst(&arch_detail),
         ),
+        // loop/jecxz
+        x @ 0xe0..=0xe3 => Inst::new(
+            &[x, 0x02, 0xeb, 0x05, 0xe9, 0, 0, 0, 0],
+            5,
+            get_jmp_dest_from_inst(&arch_detail),
+        ),
+        // short and long jmp
         0xeb | 0xe9 => Inst::new(&[0xe9, 0, 0, 0, 0], 1, get_jmp_dest_from_inst(&arch_detail)),
+        // call
         0xe8 => Inst::new(&[0xe8, 0, 0, 0, 0], 1, get_jmp_dest_from_inst(&arch_detail)),
         _ => Inst::new(inst, 0, 0),
     }
@@ -412,17 +404,13 @@ fn generate_moved_code(addr: usize) -> Result<(Vec<Inst>, OriginalCode), HookErr
         unsafe { slice::from_raw_parts(addr as *const u8, MAX_INST_LEN * JMP_INST_SIZE) };
     let mut code_idx = 0;
     while code_idx < JMP_INST_SIZE {
-        let insts = match cs.disasm_count(&code_slice[code_idx..], addr as u64, 1) {
+        let insts = match cs.disasm_count(&code_slice[code_idx..], (addr + code_idx) as u64, 1) {
             Ok(i) => i,
             Err(_) => return Err(HookError::Disassemble),
         };
         let inst = insts.iter().nth(0).unwrap();
         let detail = cs.insn_detail(&inst).unwrap();
-        ret.push(move_instruction(
-            addr + code_idx,
-            inst.bytes(),
-            &detail.arch_detail(),
-        ));
+        ret.push(move_instruction(inst.bytes(), &detail.arch_detail()));
         code_idx += inst.bytes().len();
     }
     let mut origin: OriginalCode = Default::default();
@@ -762,7 +750,7 @@ mod tests {
         let inst_info = insts.iter().nth(0).unwrap();
         let insn_detail = cs.insn_detail(&inst_info).unwrap();
         let arch_detail = insn_detail.arch_detail();
-        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
+        let new_inst = move_instruction(&inst, &arch_detail);
         assert_eq!(new_inst.bytes[..2], inst);
         assert_eq!(new_inst.len, 2);
         assert_eq!(new_inst.reloc_off, 0);
@@ -782,7 +770,7 @@ mod tests {
         let inst_info = insts.iter().nth(0).unwrap();
         let insn_detail = cs.insn_detail(&inst_info).unwrap();
         let arch_detail = insn_detail.arch_detail();
-        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
+        let new_inst = move_instruction(&inst, &arch_detail);
         let addr = inst.as_ptr() as usize as i32;
         assert_eq!(new_inst.bytes[0], 0xe9);
         assert_eq!(new_inst.reloc_addr, (addr + 2 - 2) as u32);
@@ -804,7 +792,7 @@ mod tests {
         let inst_info = insts.iter().nth(0).unwrap();
         let insn_detail = cs.insn_detail(&inst_info).unwrap();
         let arch_detail = insn_detail.arch_detail();
-        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
+        let new_inst = move_instruction(&inst, &arch_detail);
         let addr = inst.as_ptr() as usize as i32;
         assert_eq!(new_inst.bytes[0], 0xe9);
         assert_eq!(new_inst.reloc_addr, (addr + 5 - 0x20) as u32);
@@ -826,7 +814,7 @@ mod tests {
         let inst_info = insts.iter().nth(0).unwrap();
         let insn_detail = cs.insn_detail(&inst_info).unwrap();
         let arch_detail = insn_detail.arch_detail();
-        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
+        let new_inst = move_instruction(&inst, &arch_detail);
         let addr = inst.as_ptr() as usize as i32;
         assert_eq!(new_inst.bytes[0], 0xe8);
         assert_eq!(new_inst.reloc_addr, (addr + 5 + 10) as u32);
@@ -848,7 +836,7 @@ mod tests {
         let inst_info = insts.iter().nth(0).unwrap();
         let insn_detail = cs.insn_detail(&inst_info).unwrap();
         let arch_detail = insn_detail.arch_detail();
-        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
+        let new_inst = move_instruction(&inst, &arch_detail);
         let addr = inst.as_ptr() as usize as i32;
         assert_eq!(new_inst.bytes[0..2], [0x0f, 0x85]);
         assert_eq!(new_inst.reloc_addr, (addr + 2) as u32);
@@ -870,7 +858,7 @@ mod tests {
         let inst_info = insts.iter().nth(0).unwrap();
         let insn_detail = cs.insn_detail(&inst_info).unwrap();
         let arch_detail = insn_detail.arch_detail();
-        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
+        let new_inst = move_instruction(&inst, &arch_detail);
         let addr = inst.as_ptr() as usize as i32;
         assert_eq!(new_inst.bytes[0..2], [0x0f, 0x85]);
         assert_eq!(new_inst.reloc_addr, addr as u32);
@@ -892,7 +880,7 @@ mod tests {
         let inst_info = insts.iter().nth(0).unwrap();
         let insn_detail = cs.insn_detail(&inst_info).unwrap();
         let arch_detail = insn_detail.arch_detail();
-        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
+        let new_inst = move_instruction(&inst, &arch_detail);
         let addr = inst.as_ptr() as usize as i32;
         //assert_eq!(new_inst.bytes[0..5], [0xe3, 0x02, 0xeb, 0x05, 0xe9]);
         assert_eq!(new_inst.reloc_addr, (addr + 4) as u32);
@@ -925,7 +913,7 @@ mod tests {
             RelocEntry {
                 off: 9,
                 reloc_base_off: 4,
-                dest_addr: addr as u32,
+                dest_addr: (addr + 13 + 2) as u32,
             },
         ];
         relocate_addr(p.as_mut(), rel_tbl, 1, 9);
@@ -938,7 +926,7 @@ mod tests {
             .chain(off2.iter())
             .chain(off3.iter())
             .collect();
-        //assert_eq!(p.iter().cmp(b.iter().cloned()), std::cmp::Ordering::Equal);
+        assert_eq!(p.iter().cmp(b.iter().cloned()), std::cmp::Ordering::Equal);
     }
     #[test]
     fn test_generate_code() {
@@ -966,21 +954,13 @@ mod tests {
         let mut rel_tbl = Vec::<RelocEntry>::new();
         let mut buf = Cursor::new(Vec::<u8>::with_capacity(100));
         write_moved_code_to_buf(&moved_code, &mut buf, &mut rel_tbl);
-        let off = (addr as u32 + 9).to_le_bytes();
-        assert_eq!(
-            buf.into_inner(),
-            [0x53, 0x83, 0xec, 0x18, 0xe8]
-                .iter()
-                .chain(off.iter())
-                .cloned()
-                .collect::<Vec<u8>>()
-        );
+        assert_eq!(buf.into_inner(), [0x53, 0x83, 0xec, 0x18, 0xe8, 0, 0, 0, 0]);
         assert_eq!(
             rel_tbl,
             [RelocEntry {
                 off: 5,
                 reloc_base_off: 4,
-                dest_addr: addr as u32 + 9
+                dest_addr: (addr + 9) as u32
             }]
         );
     }
