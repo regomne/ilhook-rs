@@ -317,7 +317,13 @@ impl Inst {
     }
 }
 
-type RelocTable = Vec<(u8, i64)>;
+#[derive(PartialEq, Debug)]
+struct RelocEntry {
+    off: u8,
+    reloc_base_off: u8,
+    dest_addr: u32,
+}
+
 fn read_i32_checked(buf: &[u8]) -> i32 {
     i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]])
 }
@@ -336,31 +342,40 @@ fn get_jmp_dest_from_inst(detail: &ArchDetail) -> u64 {
     }
 }
 
-fn move_instruction(addr: usize, inst: &[u8], inst_detail: &InsnDetail) -> Inst {
-    let arch_detail = inst_detail.arch_detail();
+fn move_instruction(addr: usize, inst: &[u8], arch_detail: &ArchDetail) -> Inst {
     let x86 = arch_detail.x86().unwrap();
     let op1 = x86.opcode()[0];
     let op2 = x86.opcode()[1];
     match op1 {
+        // short jXX
         x if (x & 0xf0) == 0x70 => Inst::new(
             &[0x0f, 0x80 | (x & 0xf), 0, 0, 0, 0],
             2,
             get_jmp_dest_from_inst(&arch_detail),
         ),
+        // long jXX
         0x0f if (op2 & 0xf0) == 0x80 => Inst::new(
             &[0x0f, op2, 0, 0, 0, 0],
             2,
             get_jmp_dest_from_inst(&arch_detail),
         ),
+        // loop/jecxz
+        x @ 0xe0..=0xe3 => Inst::new(
+            &[x, 0x02, 0xeb, 0x05, 0xe9, 0, 0, 0, 0],
+            5,
+            get_jmp_dest_from_inst(&arch_detail),
+        ),
+        // short and long jmp
         0xeb | 0xe9 => Inst::new(&[0xe9, 0, 0, 0, 0], 1, get_jmp_dest_from_inst(&arch_detail)),
+        // call
         0xe8 => Inst::new(&[0xe8, 0, 0, 0, 0], 1, get_jmp_dest_from_inst(&arch_detail)),
-        _ if x86.modrm() == 5 => copy_rip_inst(addr, inst, &arch_detail),
+        _ if x86.modrm() == 5 => copy_rip_relative_inst(addr, inst, &arch_detail),
         _ => Inst::new(inst, 0, 0),
     }
 }
 
-fn copy_rip_inst(addr: usize, inst: &[u8], inst_detail: &ArchDetail) -> Inst {
-    let ops = inst_detail.operands();
+fn copy_rip_relative_inst(addr: usize, inst: &[u8], arch_detail: &ArchDetail) -> Inst {
+    let ops = arch_detail.operands();
     let mut disp: Option<i32> = None;
     for op in ops {
         if let ArchOperand::X86Operand(x86) = op {
@@ -400,7 +415,7 @@ fn generate_moved_code(addr: usize) -> Result<(Vec<Inst>, OriginalCode), HookErr
 
     let mut ret: Vec<Inst> = vec![];
     while code_idx < JMP_INST_SIZE {
-        let insts = match cs.disasm_count(&code_slice[code_idx..], addr as u64, 1) {
+        let insts = match cs.disasm_count(&code_slice[code_idx..], (addr + code_idx) as u64, 1) {
             Ok(i) => i,
             Err(_) => return Err(HookError::Disassemble),
         };
@@ -410,7 +425,7 @@ fn generate_moved_code(addr: usize) -> Result<(Vec<Inst>, OriginalCode), HookErr
         ret.push(move_instruction(
             addr + code_idx,
             inst.bytes(),
-            &inst_detail,
+            &inst_detail.arch_detail(),
         ));
         code_idx += inst.bytes().len();
     }
@@ -477,4 +492,166 @@ fn recover_jmp_with_thread_cb(hook: &HookPoint) -> Result<(), HookError> {
         recover_jmp(hook.addr, &hook.origin.buf[..hook.origin.len as usize]);
     }
     Ok(())
+}
+
+#[cfg(target_arch = "x86_64")]
+mod tests {
+    #[allow(unused_imports)]
+    use super::*;
+
+    #[test]
+    fn test_move_inst_1() {}
+    #[test]
+    fn test_move_inst_2() {
+        let cs = Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .syntax(arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()
+            .expect("Failed to create Capstone object");
+        // jmp @-2
+        let inst = [0xeb, 0xfe];
+        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
+        let inst_info = insts.iter().nth(0).unwrap();
+        let insn_detail = cs.insn_detail(&inst_info).unwrap();
+        let arch_detail = insn_detail.arch_detail();
+        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
+        let addr = inst.as_ptr() as isize;
+        assert_eq!(new_inst.bytes[0], 0xe9);
+        assert_eq!(new_inst.reloc_addr, (addr + 2 - 2) as u64);
+        assert_eq!(new_inst.len, 5);
+        assert_eq!(new_inst.reloc_off, 1);
+    }
+    #[test]
+    fn test_move_inst_3() {
+        let cs = Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .syntax(arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()
+            .expect("Failed to create Capstone object");
+        // jmp @-0x20
+        let inst = [0xe9, 0xe0, 0xff, 0xff, 0xff];
+        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
+        let inst_info = insts.iter().nth(0).unwrap();
+        let insn_detail = cs.insn_detail(&inst_info).unwrap();
+        let arch_detail = insn_detail.arch_detail();
+        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
+        let addr = inst.as_ptr() as isize;
+        assert_eq!(new_inst.bytes[0], 0xe9);
+        assert_eq!(new_inst.reloc_addr, (addr + 5 - 0x20) as u64);
+        assert_eq!(new_inst.len, 5);
+        assert_eq!(new_inst.reloc_off, 1);
+    }
+    #[test]
+    fn test_move_inst_4() {
+        let cs = Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .syntax(arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()
+            .expect("Failed to create Capstone object");
+        // call @+10
+        let inst = [0xe8, 0xa, 0, 0, 0];
+        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
+        let inst_info = insts.iter().nth(0).unwrap();
+        let insn_detail = cs.insn_detail(&inst_info).unwrap();
+        let arch_detail = insn_detail.arch_detail();
+        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
+        let addr = inst.as_ptr() as isize;
+        assert_eq!(new_inst.bytes[0], 0xe8);
+        assert_eq!(new_inst.reloc_addr, (addr + 5 + 10) as u64);
+        assert_eq!(new_inst.len, 5);
+        assert_eq!(new_inst.reloc_off, 1);
+    }
+    #[test]
+    fn test_move_inst_5() {
+        let cs = Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .syntax(arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()
+            .expect("Failed to create Capstone object");
+        // jnz @+0
+        let inst = [0x75, 0];
+        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
+        let inst_info = insts.iter().nth(0).unwrap();
+        let insn_detail = cs.insn_detail(&inst_info).unwrap();
+        let arch_detail = insn_detail.arch_detail();
+        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
+        let addr = inst.as_ptr() as isize;
+        assert_eq!(new_inst.bytes[0..2], [0x0f, 0x85]);
+        assert_eq!(new_inst.reloc_addr, (addr + 2) as u64);
+        assert_eq!(new_inst.len, 6);
+        assert_eq!(new_inst.reloc_off, 2);
+    }
+    #[test]
+    fn test_move_inst_6() {
+        let cs = Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .syntax(arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()
+            .expect("Failed to create Capstone object");
+        // jnz @-6
+        let inst = [0x0f, 0x85, 0xfa, 0xff, 0xff, 0xff];
+        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
+        let inst_info = insts.iter().nth(0).unwrap();
+        let insn_detail = cs.insn_detail(&inst_info).unwrap();
+        let arch_detail = insn_detail.arch_detail();
+        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
+        let addr = inst.as_ptr() as isize;
+        assert_eq!(new_inst.bytes[0..2], [0x0f, 0x85]);
+        assert_eq!(new_inst.reloc_addr, addr as u64);
+        assert_eq!(new_inst.len, 6);
+        assert_eq!(new_inst.reloc_off, 2);
+    }
+    #[test]
+    fn test_move_inst_7() {
+        let cs = Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .syntax(arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()
+            .expect("Failed to create Capstone object");
+        // jecxz @+10
+        let inst = [0xe3, 0x02];
+        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
+        let inst_info = insts.iter().nth(0).unwrap();
+        let insn_detail = cs.insn_detail(&inst_info).unwrap();
+        let arch_detail = insn_detail.arch_detail();
+        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
+        let addr = inst.as_ptr() as isize;
+        assert_eq!(new_inst.reloc_addr, (addr + 4) as u64);
+        assert_eq!(new_inst.len, 9);
+        assert_eq!(new_inst.reloc_off, 5);
+    }
+
+    #[test]
+    fn test_move_inst_8() {
+        let cs = Capstone::new()
+            .x86()
+            .mode(arch::x86::ArchMode::Mode64)
+            .syntax(arch::x86::ArchSyntax::Intel)
+            .detail(true)
+            .build()
+            .expect("Failed to create Capstone object");
+        // mov rax, [rip + 0x00000001]
+        let inst = [0x48, 0x8b, 0x05, 0x01, 0x00, 0x00, 0x00];
+        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
+        let inst_info = insts.iter().nth(0).unwrap();
+        let insn_detail = cs.insn_detail(&inst_info).unwrap();
+        let arch_detail = insn_detail.arch_detail();
+        let new_inst = move_instruction(inst.as_ptr() as usize, &inst, &arch_detail);
+        let addr = inst.as_ptr() as isize;
+        assert_eq!(new_inst.reloc_addr, (addr + 8) as u64);
+        assert_eq!(new_inst.len, 7);
+        assert_eq!(new_inst.reloc_off, 3);
+    }
 }
