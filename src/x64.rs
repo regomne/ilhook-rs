@@ -437,13 +437,30 @@ fn generate_moved_code(addr: usize) -> Result<(Vec<Inst>, OriginalCode), HookErr
     Ok((ret, origin))
 }
 
+fn generate_jmp_back_stub(
+    buf: &mut Cursor<Vec<u8>>,
+    rel_tbl: &mut Vec<RelocEntry>,
+    moved_code: Vec<Inst>,
+    ori_addr: usize,
+    cb: JmpBackRoutine,
+    ori_len: u8,
+) -> Result<(u8, u8), HookError> {
+    // mov rdx, ori_addr
+    buf.write(&[0x48, 0xba])?;
+    buf.write(&(ori_addr as u64).to_le_bytes())?;
+
+    Ok((0, 0))
+}
+
 fn generate_stub(
     hooker: &Hooker,
     moved_code: Vec<Inst>,
     ori_len: u8,
 ) -> Result<Pin<Box<[u8]>>, HookError> {
-    let mut rel_tbl = Vec::<u8>::new();
+    let mut rel_tbl = Vec::<RelocEntry>::new();
     let mut buf = Cursor::new(Vec::<u8>::with_capacity(160));
+    // write push all registers
+    buf.write(&[0, 0])?;
 
     Err(HookError::Unknown)
 }
