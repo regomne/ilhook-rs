@@ -1,5 +1,4 @@
-use capstone::arch::x86::{X86InsnDetail, X86OperandType};
-use capstone::arch::ArchOperand;
+use capstone::arch::{x86::X86OperandType, ArchOperand};
 use capstone::prelude::*;
 use std::io::{Cursor, Write};
 use std::pin::Pin;
@@ -321,9 +320,9 @@ impl Inst {
 
 #[derive(PartialEq, Debug)]
 struct RelocEntry {
-    off: u8,
+    off: u16,
     reloc_base_off: u8,
-    dest_addr: u32,
+    dest_addr: u64,
 }
 
 fn read_i32_checked(buf: &[u8]) -> i32 {
@@ -437,6 +436,122 @@ fn generate_moved_code(addr: usize) -> Result<(Vec<Inst>, OriginalCode), HookErr
     Ok((ret, origin))
 }
 
+fn write_stub_prolog(buf: &mut Cursor<Vec<u8>>) -> Result<usize, std::io::Error> {
+    // pushfq
+    // test rsp,8
+    // je _branch1
+    // push rax
+    // mov rax,qword ptr ss:[rsp+8]
+    // mov dword ptr ss:[rsp+8],0
+    // jmp _branch2
+    // _branch1:
+    // sub rsp,8
+    // push rax
+    // mov rax,qword ptr ss:[rsp+10]
+    // mov dword ptr ss:[rsp+8],1
+    // _branch2:
+    // push rax
+    // push rbx
+    // push rcx
+    // push rdx
+    // push rsi
+    // push rdi
+    // push rsp
+    // push rbp
+    // push r8
+    // push r9
+    // push r10
+    // push r11
+    // push r12
+    // push r13
+    // push r14
+    // push r15
+    // sub rsp,40
+    // movaps xmmword ptr ss:[rsp],xmm0
+    // movaps xmmword ptr ss:[rsp+10],xmm1
+    // movaps xmmword ptr ss:[rsp+20],xmm2
+    // movaps xmmword ptr ss:[rsp+30],xmm3
+    buf.write(&[
+        0x9C, 0x48, 0xF7, 0xC4, 0x08, 0x00, 0x00, 0x00, 0x74, 0x10, 0x50, 0x48, 0x8B, 0x44, 0x24,
+        0x08, 0xC7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, 0xEB, 0x12, 0x48, 0x83, 0xEC, 0x08,
+        0x50, 0x48, 0x8B, 0x44, 0x24, 0x10, 0xC7, 0x44, 0x24, 0x08, 0x01, 0x00, 0x00, 0x00, 0x50,
+        0x53, 0x51, 0x52, 0x56, 0x57, 0x54, 0x55, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53,
+        0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x0F, 0x29, 0x04,
+        0x24, 0x0F, 0x29, 0x4C, 0x24, 0x10, 0x0F, 0x29, 0x54, 0x24, 0x20, 0x0F, 0x29, 0x5C, 0x24,
+        0x30,
+    ])
+}
+
+fn write_stub_epilog1(buf: &mut Cursor<Vec<u8>>) -> Result<usize, std::io::Error> {
+    // movaps xmm0,xmmword ptr ss:[rsp]
+    // movaps xmm1,xmmword ptr ss:[rsp+10]
+    // movaps xmm2,xmmword ptr ss:[rsp+20]
+    // movaps xmm3,xmmword ptr ss:[rsp+30]
+    // add rsp,40
+    // pop r15
+    // pop r14
+    // pop r13
+    // pop r12
+    // pop r11
+    // pop r10
+    // pop r9
+    // pop r8
+    // pop rbp
+    // pop rsp
+    // pop rdi
+    // pop rsi
+    // pop rdx
+    // pop rcx
+    // pop rbx
+    buf.write(&[
+        0x0F, 0x28, 0x04, 0x24, 0x0F, 0x28, 0x4C, 0x24, 0x10, 0x0F, 0x28, 0x54, 0x24, 0x20, 0x0F,
+        0x28, 0x5C, 0x24, 0x30, 0x48, 0x83, 0xC4, 0x40, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41,
+        0x5C, 0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x5D, 0x5C, 0x5F, 0x5E, 0x5A, 0x59,
+        0x5B,
+    ])
+}
+
+fn write_stub_epilog2_common(buf: &mut Cursor<Vec<u8>>) -> Result<usize, std::io::Error> {
+    // test dword ptr ss:[rsp+10],1
+    // je _branch1
+    // popfq
+    // pop rax
+    // add rsp,10
+    // jmp _branch2
+    // _branch1:
+    // popfq
+    // pop rax
+    // add rsp,8
+    // _branch2:
+    buf.write(&[
+        0xF7, 0x44, 0x24, 0x10, 0x01, 0x00, 0x00, 0x00, 0x74, 0x08, 0x9D, 0x58, 0x48, 0x83, 0xC4,
+        0x10, 0xEB, 0x06, 0x9D, 0x58, 0x48, 0x83, 0xC4, 0x08,
+    ])
+}
+
+fn write_moved_code_to_buf(
+    code: Vec<Inst>,
+    buf: &mut Cursor<Vec<u8>>,
+    reloc_tbl: &mut Vec<RelocEntry>,
+) {
+    code.iter().for_each(|inst| {
+        if inst.reloc_off != 0 {
+            reloc_tbl.push(RelocEntry {
+                off: buf.position() as u16 + inst.reloc_off as u16,
+                reloc_base_off: inst.len - inst.reloc_off,
+                dest_addr: inst.reloc_addr,
+            });
+        }
+        buf.write(&inst.bytes[..inst.len as usize]).unwrap();
+    });
+}
+
+fn jmp_addr(addr: u64, buf: &mut Cursor<Vec<u8>>) -> Result<(), HookError> {
+    buf.write(&[0xff, 0x25, 0, 0, 0, 0])?;
+    buf.write(&addr.to_le_bytes())?;
+    Ok(())
+}
+
 fn generate_jmp_back_stub(
     buf: &mut Cursor<Vec<u8>>,
     rel_tbl: &mut Vec<RelocEntry>,
@@ -444,11 +559,104 @@ fn generate_jmp_back_stub(
     ori_addr: usize,
     cb: JmpBackRoutine,
     ori_len: u8,
-) -> Result<(u8, u8), HookError> {
+) -> Result<(u16, u16), HookError> {
     // mov rdx, ori_addr
     buf.write(&[0x48, 0xba])?;
     buf.write(&(ori_addr as u64).to_le_bytes())?;
+    // mov rcx, rsp
+    // sub rsp, 0x10
+    // mov rax, cb
+    buf.write(&[0x48, 0x8b, 0xcc, 0x48, 0x83, 0xec, 0x10, 0x48, 0xb8])?;
+    buf.write(&(cb as usize as u64).to_le_bytes())?;
+    // call rax
+    // add rsp, 0x10
+    buf.write(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x10])?;
+    write_stub_epilog1(buf)?;
+    write_stub_epilog2_common(buf)?;
+    write_moved_code_to_buf(moved_code, buf, rel_tbl);
+    jmp_addr(ori_addr as u64 + ori_len as u64, buf)?;
+    Ok((0, 0))
+}
 
+fn generate_retn_stub(
+    buf: &mut Cursor<Vec<u8>>,
+    rel_tbl: &mut Vec<RelocEntry>,
+    moved_code: Vec<Inst>,
+    ori_addr: usize,
+    cb: RetnRoutine,
+    ori_len: u8,
+) -> Result<(u16, u16), HookError> {
+    // mov r8, ori_addr
+    buf.write(&[0x49, 0xb8])?;
+    buf.write(&(ori_addr as u64).to_le_bytes())?;
+    let ori_func_addr_off = buf.position() as u16 + 2;
+    // mov rdx, ori_func
+    // mov rcx, rsp
+    // sub rsp,0x20
+    // mov rax, cb
+    buf.write(&[
+        0x48, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x8b, 0xcc, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
+    ])?;
+    buf.write(&(cb as usize as u64).to_le_bytes())?;
+    // call rax
+    // add rsp, 0x20
+    // mov [rsp + 0xc0], rax
+    buf.write(&[
+        0xff, 0xd0, 0x48, 0x83, 0xc4, 0x20, 0x48, 0x89, 0x84, 0x24, 0xc0, 0x00, 0x00, 0x00,
+    ])?;
+    write_stub_epilog1(buf)?;
+    write_stub_epilog2_common(buf)?;
+    // ret
+    buf.write(&[0xc3])?;
+    let ori_func_off = buf.position() as u16;
+    write_moved_code_to_buf(moved_code, buf, rel_tbl);
+    jmp_addr(ori_addr as u64 + ori_len as u64, buf)?;
+
+    Ok((ori_func_addr_off, ori_func_off))
+}
+
+fn generate_jmp_addr_stub(
+    buf: &mut Cursor<Vec<u8>>,
+    rel_tbl: &mut Vec<RelocEntry>,
+    moved_code: Vec<Inst>,
+    ori_addr: usize,
+    dest_addr: usize,
+    cb: JmpToAddrRoutine,
+    ori_len: u8,
+) -> Result<(u16, u16), HookError> {
+    // mov r8, ori_addr
+    buf.write(&[0x49, 0xb8])?;
+    buf.write(&(ori_addr as u64).to_le_bytes())?;
+    let ori_func_addr_off = buf.position() as u16 + 2;
+    // mov rdx, ori_func
+    // mov rcx, rsp
+    // sub rsp,0x20
+    // mov rax, cb
+    buf.write(&[
+        0x48, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x8b, 0xcc, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
+    ])?;
+    buf.write(&(cb as usize as u64).to_le_bytes())?;
+    // call rax
+    // add rsp, 0x20
+    buf.write(&[0xff, 0xd0, 0x48, 0x83, 0xc4])?;
+    write_stub_epilog1(buf)?;
+    write_stub_epilog2_common(buf)?;
+    jmp_addr(dest_addr as u64, buf)?;
+    let ori_func_off = buf.position() as u16;
+    write_moved_code_to_buf(moved_code, buf, rel_tbl);
+    jmp_addr(ori_addr as u64 + ori_len as u64, buf)?;
+
+    Ok((ori_func_addr_off, ori_func_off))
+}
+
+fn generate_jmp_ret_stub(
+    buf: &mut Cursor<Vec<u8>>,
+    rel_tbl: &mut Vec<RelocEntry>,
+    moved_code: Vec<Inst>,
+    ori_addr: usize,
+    cb: JmpToRetRoutine,
+    ori_len: u8,
+) -> Result<(u16, u16), HookError> {
     Ok((0, 0))
 }
 
@@ -458,29 +666,60 @@ fn generate_stub(
     ori_len: u8,
 ) -> Result<Pin<Box<[u8]>>, HookError> {
     let mut rel_tbl = Vec::<RelocEntry>::new();
-    let mut buf = Cursor::new(Vec::<u8>::with_capacity(160));
-    // write push all registers
-    buf.write(&[0, 0])?;
+    let mut buf = Cursor::new(Vec::<u8>::with_capacity(240));
+
+    write_stub_prolog(&mut buf)?;
+
+    let (ori_func_addr_off, ori_func_off) = match hooker.hook_type {
+        HookType::JmpBack(cb) => {
+            generate_jmp_back_stub(&mut buf, &mut rel_tbl, moved_code, hooker.addr, cb, ori_len)?
+        }
+        HookType::Retn(cb) => {
+            generate_retn_stub(&mut buf, &mut rel_tbl, moved_code, hooker.addr, cb, ori_len)?
+        }
+        HookType::JmpToAddr(dest_addr, cb) => generate_jmp_addr_stub(
+            &mut buf,
+            &mut rel_tbl,
+            moved_code,
+            hooker.addr,
+            dest_addr,
+            cb,
+            ori_len,
+        )?,
+        HookType::JmpToRet(cb) => {
+            generate_jmp_ret_stub(&mut buf, &mut rel_tbl, moved_code, hooker.addr, cb, ori_len)?
+        }
+    };
 
     Err(HookError::Unknown)
 }
 
 #[cfg(windows)]
 fn modify_mem_protect(addr: usize, len: usize) -> Result<u32, HookError> {
-    Err(HookError::Unknown)
+    let mut old_prot: u32 = 0;
+    let old_prot_ptr = &mut old_prot as *mut u32;
+    // PAGE_EXECUTE_READWRITE = 0x40
+    let ret = unsafe { VirtualProtect(addr as LPVOID, len, 0x40, old_prot_ptr) };
+    if ret == 0 {
+        Err(HookError::MemoryProtect(unsafe { GetLastError() }))
+    } else {
+        Ok(old_prot)
+    }
 }
 
 #[cfg(windows)]
-fn recover_mem_protect(addr: usize, len: usize, old: u32) {}
+fn recover_mem_protect(addr: usize, len: usize, old: u32) {
+    let mut old_prot: u32 = 0;
+    let old_prot_ptr = &mut old_prot as *mut u32;
+    unsafe { VirtualProtect(addr as LPVOID, len, old, old_prot_ptr) };
+}
 
 fn modify_jmp(dest_addr: usize, stub_addr: usize) -> Result<(), HookError> {
     let buf = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, JMP_INST_SIZE) };
     // jmp stub_addr
     buf[0] = 0xe9;
     let rel_off = stub_addr as i32 - (dest_addr as i32 + 5);
-    buf.split_at_mut(1)
-        .1
-        .copy_from_slice(&rel_off.to_le_bytes());
+    buf[1..5].copy_from_slice(&rel_off.to_le_bytes());
     Ok(())
 }
 
