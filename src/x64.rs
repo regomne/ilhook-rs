@@ -9,7 +9,9 @@ use winapi::shared::minwindef::LPVOID;
 #[cfg(windows)]
 use winapi::um::errhandlingapi::GetLastError;
 #[cfg(windows)]
-use winapi::um::memoryapi::VirtualProtect;
+use winapi::um::memoryapi::{VirtualAlloc, VirtualFree, VirtualProtect, VirtualQuery};
+#[cfg(windows)]
+use winapi::um::winnt::MEM_RELEASE;
 
 #[cfg(unix)]
 use libc::{__errno_location, c_void, mprotect, sysconf};
@@ -745,6 +747,39 @@ fn generate_stub(
 
     Err(HookError::Unknown)
 }
+
+struct FixedMemory {
+    addr: usize,
+    len: u32,
+}
+impl Drop for FixedMemory {
+    fn drop(&mut self) {
+        unsafe { VirtualFree(self.addr as LPVOID, 0, MEM_RELEASE) };
+    }
+}
+
+struct Bound {
+    min: u64,
+    max: u64,
+}
+
+impl Bound {
+    fn new(init_addr: u64) -> Self {
+        let x = 33u64;
+        Self {
+            min: init_addr.checked_sub(i32::max_value() as u64).unwrap_or(0),
+            max: init_addr
+                .checked_add(i32::max_value() as u64)
+                .unwrap_or(u64::max_value()),
+        }
+    }
+
+    fn compare(dest: u64) -> Self {}
+}
+
+fn calc_memory_bound(hook_addr: usize, rel_tbl: &Vec<RelocEntry>) -> (usize, usize) {}
+
+fn allocate_stub_memory(hook_addr: usize, rel_tbl: &Vec<RelocEntry>) -> FixedMemory {}
 
 #[cfg(windows)]
 fn modify_mem_protect(addr: usize, len: usize) -> Result<u32, HookError> {
