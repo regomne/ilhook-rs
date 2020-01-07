@@ -100,42 +100,48 @@ pub enum JmpType {
 #[repr(C)]
 #[derive(Debug)]
 pub struct Registers {
-    /// The rax register
-    pub rax: u64,
-    /// The rcx register
-    pub rcx: u64,
-    /// The rdx register
-    pub rdx: u64,
-    /// The rbx register
-    pub rbx: u64,
-    /// The rsp register
-    pub rsp: u64,
-    /// The rbp register
-    pub rbp: u64,
-    /// The rsi register
-    pub rsi: u64,
-    /// The rdi register
-    pub rdi: u64,
-    /// The r8 register
-    pub r8: u64,
-    /// The r9 register
-    pub r9: u64,
-    /// The r10 register
-    pub r10: u64,
-    /// The r11 register
-    pub r11: u64,
-    /// The r12 register
-    pub r12: u64,
-    /// The r13 register
-    pub r13: u64,
-    /// The r14 register
-    pub r14: u64,
-    /// The r15 register
-    pub r15: u64,
-    /// The flags register
-    pub rflags: u64,
     /// The xmm0 register
     pub xmm0: u128,
+    /// The xmm1 register
+    pub xmm1: u128,
+    /// The xmm2 register
+    pub xmm2: u128,
+    /// The xmm3 register
+    pub xmm3: u128,
+    /// The r15 register
+    pub r15: u64,
+    /// The r14 register
+    pub r14: u64,
+    /// The r13 register
+    pub r13: u64,
+    /// The r12 register
+    pub r12: u64,
+    /// The r11 register
+    pub r11: u64,
+    /// The r10 register
+    pub r10: u64,
+    /// The r9 register
+    pub r9: u64,
+    /// The r8 register
+    pub r8: u64,
+    /// The rbp register
+    pub rbp: u64,
+    /// The rsp register
+    pub rsp: u64,
+    /// The rdi register
+    pub rdi: u64,
+    /// The rsi register
+    pub rsi: u64,
+    /// The rdx register
+    pub rdx: u64,
+    /// The rcx register
+    pub rcx: u64,
+    /// The rbx register
+    pub rbx: u64,
+    /// The flags register
+    pub rflags: u64,
+    /// The rax register
+    pub rax: u64,
 }
 
 impl Registers {
@@ -529,6 +535,27 @@ fn write_stub_epilog2_common(buf: &mut Cursor<Vec<u8>>) -> Result<usize, std::io
     ])
 }
 
+fn write_stub_epilog2_jmp_ret(buf: &mut Cursor<Vec<u8>>) -> Result<usize, std::io::Error> {
+    // test dword ptr ss:[rsp+10],1
+    // je _branch1
+    // popfq
+    // mov qword ptr ss:[rsp+10],rax
+    // pop rax
+    // add rsp,10
+    // jmp _branch2
+    // _branch1:
+    // popfq
+    // mov qword ptr ss:[rsp+8],rax
+    // pop rax
+    // add rsp,8
+    // _branch2:
+    // jmp qword ptr ss:[rsp-8]
+    buf.write(&[
+        0xF7, 0x44, 0x24, 0x10, 0x01, 0x00, 0x00, 0x00, 0x74, 0x0D, 0x9D, 0x48, 0x89, 0x44, 0x24,
+        0x10, 0x58, 0x48, 0x83, 0xC4, 0x10, 0xEB, 0x0B, 0x9D, 0x48, 0x89, 0x44, 0x24, 0x08, 0x58,
+        0x48, 0x83, 0xC4, 0x08, 0xFF, 0x64, 0x24, 0xF8,
+    ])
+}
 fn write_moved_code_to_buf(
     code: Vec<Inst>,
     buf: &mut Cursor<Vec<u8>>,
@@ -573,6 +600,7 @@ fn generate_jmp_back_stub(
     buf.write(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x10])?;
     write_stub_epilog1(buf)?;
     write_stub_epilog2_common(buf)?;
+
     write_moved_code_to_buf(moved_code, buf, rel_tbl);
     jmp_addr(ori_addr as u64 + ori_len as u64, buf)?;
     Ok((0, 0))
@@ -608,6 +636,7 @@ fn generate_retn_stub(
     write_stub_epilog2_common(buf)?;
     // ret
     buf.write(&[0xc3])?;
+
     let ori_func_off = buf.position() as u16;
     write_moved_code_to_buf(moved_code, buf, rel_tbl);
     jmp_addr(ori_addr as u64 + ori_len as u64, buf)?;
@@ -638,10 +667,11 @@ fn generate_jmp_addr_stub(
     buf.write(&(cb as usize as u64).to_le_bytes())?;
     // call rax
     // add rsp, 0x20
-    buf.write(&[0xff, 0xd0, 0x48, 0x83, 0xc4])?;
+    buf.write(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x20])?;
     write_stub_epilog1(buf)?;
     write_stub_epilog2_common(buf)?;
     jmp_addr(dest_addr as u64, buf)?;
+
     let ori_func_off = buf.position() as u16;
     write_moved_code_to_buf(moved_code, buf, rel_tbl);
     jmp_addr(ori_addr as u64 + ori_len as u64, buf)?;
@@ -657,7 +687,29 @@ fn generate_jmp_ret_stub(
     cb: JmpToRetRoutine,
     ori_len: u8,
 ) -> Result<(u16, u16), HookError> {
-    Ok((0, 0))
+    // mov r8, ori_addr
+    buf.write(&[0x49, 0xb8])?;
+    buf.write(&(ori_addr as u64).to_le_bytes())?;
+    let ori_func_addr_off = buf.position() as u16 + 2;
+    // mov rdx, ori_func
+    // mov rcx, rsp
+    // sub rsp,0x20
+    // mov rax, cb
+    buf.write(&[
+        0x48, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x8b, 0xcc, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
+    ])?;
+    buf.write(&(cb as usize as u64).to_le_bytes())?;
+    // call rax
+    // add rsp, 0x20
+    buf.write(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x20])?;
+    write_stub_epilog1(buf)?;
+    write_stub_epilog2_jmp_ret(buf)?;
+
+    let ori_func_off = buf.position() as u16;
+    write_moved_code_to_buf(moved_code, buf, rel_tbl);
+    jmp_addr(ori_addr as u64 + ori_len as u64, buf)?;
+
+    Ok((ori_func_addr_off, ori_func_off))
 }
 
 fn generate_stub(
