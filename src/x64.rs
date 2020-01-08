@@ -1,5 +1,6 @@
 use capstone::arch::{x86::X86OperandType, ArchOperand};
 use capstone::prelude::*;
+use std::cmp;
 use std::io::{Cursor, Write};
 use std::pin::Pin;
 use std::slice;
@@ -757,6 +758,16 @@ impl Drop for FixedMemory {
         unsafe { VirtualFree(self.addr as LPVOID, 0, MEM_RELEASE) };
     }
 }
+impl FixedMemory {
+    fn allocate(hook_addr: u64, rel_tbl: &Vec<RelocEntry>) -> Result<Self, HookError> {
+        let bound = rel_tbl
+            .iter()
+            .fold(Bound::new(hook_addr), |b, ent| b.to_new(ent.dest_addr));
+        bound.check()?;
+
+        Err(HookError::Unknown)
+    }
+}
 
 struct Bound {
     min: u64,
@@ -765,7 +776,6 @@ struct Bound {
 
 impl Bound {
     fn new(init_addr: u64) -> Self {
-        let x = 33u64;
         Self {
             min: init_addr.checked_sub(i32::max_value() as u64).unwrap_or(0),
             max: init_addr
@@ -774,12 +784,28 @@ impl Bound {
         }
     }
 
-    fn compare(dest: u64) -> Self {}
+    fn to_new(self, dest: u64) -> Self {
+        Self {
+            min: cmp::max(
+                self.min,
+                dest.checked_sub(i32::max_value() as u64).unwrap_or(0),
+            ),
+            max: cmp::min(
+                self.max,
+                dest.checked_add(i32::max_value() as u64)
+                    .unwrap_or(u64::max_value()),
+            ),
+        }
+    }
+
+    fn check(&self) -> Result<(), HookError> {
+        if self.min > self.max {
+            Err(HookError::InvalidParameter)
+        } else {
+            Ok(())
+        }
+    }
 }
-
-fn calc_memory_bound(hook_addr: usize, rel_tbl: &Vec<RelocEntry>) -> (usize, usize) {}
-
-fn allocate_stub_memory(hook_addr: usize, rel_tbl: &Vec<RelocEntry>) -> FixedMemory {}
 
 #[cfg(windows)]
 fn modify_mem_protect(addr: usize, len: usize) -> Result<u32, HookError> {
