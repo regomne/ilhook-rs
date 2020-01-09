@@ -12,7 +12,7 @@ use winapi::um::errhandlingapi::GetLastError;
 #[cfg(windows)]
 use winapi::um::memoryapi::{VirtualAlloc, VirtualFree, VirtualProtect, VirtualQuery};
 #[cfg(windows)]
-use winapi::um::winnt::MEM_RELEASE;
+use winapi::um::winnt::{MEMORY_BASIC_INFORMATION, MEM_RELEASE};
 
 #[cfg(unix)]
 use libc::{__errno_location, c_void, mprotect, sysconf};
@@ -769,6 +769,21 @@ impl FixedMemory {
     }
 }
 
+fn query(bnd: &Bound) -> Result<(), HookError> {
+    let mut mbi: MEMORY_BASIC_INFORMATION = Default::default();
+    let nb = bnd.clone();
+    let mut i = 0;
+    while i < nb.max {
+        let ret = unsafe { VirtualQuery(i as LPVOID, &mut mbi, 1) };
+        if ret == 0 {
+            return Err(HookErr::Unknown);
+        }
+    }
+    Ok(())
+    //let ret=unsafe{VirtualQuery()}
+}
+
+#[derive(Clone)]
 struct Bound {
     min: u64,
     max: u64,
