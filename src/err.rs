@@ -12,6 +12,9 @@ pub enum HookError {
     #[error("memory protect error, code:{0}")]
     MemoryProtect(u32),
 
+    #[error("memory allocation error")]
+    MemoryAllocation,
+
     /// Can't disassemble in the specified address
     #[error("disassemble error")]
     Disassemble,

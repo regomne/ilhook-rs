@@ -2,6 +2,7 @@ use capstone::arch::{x86::X86OperandType, ArchOperand};
 use capstone::prelude::*;
 use std::cmp;
 use std::io::{Cursor, Write};
+use std::mem::{size_of, MaybeUninit};
 use std::pin::Pin;
 use std::slice;
 
@@ -12,12 +13,16 @@ use winapi::um::errhandlingapi::GetLastError;
 #[cfg(windows)]
 use winapi::um::memoryapi::{VirtualAlloc, VirtualFree, VirtualProtect, VirtualQuery};
 #[cfg(windows)]
-use winapi::um::winnt::{MEMORY_BASIC_INFORMATION, MEM_RELEASE};
+use winapi::um::winnt::{
+    MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_FREE, MEM_RELEASE, PAGE_EXECUTE_READWRITE,
+};
 
 #[cfg(unix)]
 use libc::{__errno_location, c_void, mprotect, sysconf};
 
 use crate::err::HookError;
+use crate::x64::QueryResult::NotUsable;
+use winapi::um::winnt::PAGE_EXECUTE_READWRITE;
 
 const MAX_INST_LEN: usize = 15;
 const JMP_INST_SIZE: usize = 5;
@@ -750,8 +755,13 @@ fn generate_stub(
 }
 
 struct FixedMemory {
-    addr: usize,
+    addr: u64,
     len: u32,
+}
+enum QueryResult {
+    Success(u64),
+    NotUsable(u64),
+    Fail,
 }
 impl Drop for FixedMemory {
     fn drop(&mut self) {
@@ -764,23 +774,63 @@ impl FixedMemory {
             .iter()
             .fold(Bound::new(hook_addr), |b, ent| b.to_new(ent.dest_addr));
         bound.check()?;
+        let addr = FixedMemory::allocate_internal(&bound)?;
 
-        Err(HookError::Unknown)
+        Ok(Self { addr, len: 4096 })
     }
-}
 
-fn query(bnd: &Bound) -> Result<(), HookError> {
-    let mut mbi: MEMORY_BASIC_INFORMATION = Default::default();
-    let nb = bnd.clone();
-    let mut i = 0;
-    while i < nb.max {
-        let ret = unsafe { VirtualQuery(i as LPVOID, &mut mbi, 1) };
+    fn query_and_alloc(addr: u64) -> QueryResult {
+        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { MaybeUninit::uninit().assume_init() };
+        let ret = unsafe {
+            VirtualQuery(
+                addr as LPVOID,
+                &mut mbi,
+                size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
         if ret == 0 {
-            return Err(HookErr::Unknown);
+            QueryResult::Fail
+        } else if mbi.State == MEM_FREE && mbi.RegionSize >= 4096 {
+            let mem =
+                unsafe { VirtualAlloc(mbi.BaseAddress, 4096, MEM_COMMIT, PAGE_EXECUTE_READWRITE) };
+            QueryResult::Success(mem as usize as u64)
+        } else {
+            QueryResult::NotUsable(mbi.RegionSize as u64)
         }
     }
-    Ok(())
-    //let ret=unsafe{VirtualQuery()}
+
+    fn allocate_internal(bnd: &Bound) -> Result<u64, HookError> {
+        let nb = bnd.clone();
+        let mut cur_addr = nb.middle();
+        while cur_addr < nb.max {
+            match FixedMemory::query_and_alloc(cur_addr) {
+                QueryResult::Success(addr) => {
+                    return Ok(addr);
+                }
+                QueryResult::NotUsable(size) => {
+                    cur_addr += if size > 0 { size } else { 4096 };
+                }
+                QueryResult::Fail => {
+                    return Err(HookError::MemoryAllocation);
+                }
+            }
+        }
+        cur_addr = nb.middle();
+        while cur_addr > nb.min {
+            match FixedMemory::query_and_alloc(cur_addr) {
+                QueryResult::Success(addr) => {
+                    return Ok(addr);
+                }
+                QueryResult::NotUsable(size) => {
+                    cur_addr = size.checked_sub(4096).unwrap_or(0);
+                }
+                QueryResult::Fail => {
+                    return Err(HookError::MemoryAllocation);
+                }
+            }
+        }
+        Err(HookError::MemoryAllocation)
+    }
 }
 
 #[derive(Clone)]
@@ -819,6 +869,10 @@ impl Bound {
         } else {
             Ok(())
         }
+    }
+
+    fn middle(&self) -> u64 {
+        self.min / 2 + self.max / 2
     }
 }
 
