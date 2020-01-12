@@ -11,18 +11,15 @@ use winapi::shared::minwindef::LPVOID;
 #[cfg(windows)]
 use winapi::um::errhandlingapi::GetLastError;
 #[cfg(windows)]
-use winapi::um::memoryapi::{VirtualAlloc, VirtualFree, VirtualProtect, VirtualQuery};
-#[cfg(windows)]
-use winapi::um::winnt::{
-    MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_FREE, MEM_RELEASE, PAGE_EXECUTE_READWRITE,
-};
+use winapi::um::memoryapi::VirtualProtect;
+
+mod fixed_memory;
+use fixed_memory::FixedMemory;
 
 #[cfg(unix)]
 use libc::{__errno_location, c_void, mprotect, sysconf};
 
 use crate::err::HookError;
-use crate::x64::QueryResult::NotUsable;
-use winapi::um::winnt::PAGE_EXECUTE_READWRITE;
 
 const MAX_INST_LEN: usize = 15;
 const JMP_INST_SIZE: usize = 5;
@@ -217,8 +214,8 @@ struct OriginalCode {
 /// The hook result returned by Hooker::hook.
 pub struct HookPoint {
     addr: usize,
-    stub: Pin<Box<[u8]>>,
-    stub_prot: u32,
+    #[allow(dead_code)] // we only use the drop trait of the stub
+    stub: FixedMemory,
     origin: OriginalCode,
     thread_cb: CallbackOption,
     flags: HookFlags,
@@ -261,19 +258,17 @@ impl Hooker {
     pub fn hook(self) -> Result<HookPoint, HookError> {
         let (moved_code, origin) = generate_moved_code(self.addr)?;
         let stub = generate_stub(&self, moved_code, origin.len)?;
-        let stub_prot = modify_mem_protect(stub.as_ptr() as usize, stub.len())?;
         if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
             let old_prot = modify_mem_protect(self.addr, JMP_INST_SIZE)?;
-            let ret = modify_jmp_with_thread_cb(&self, stub.as_ptr() as usize);
+            let ret = modify_jmp_with_thread_cb(&self, stub.addr as usize);
             recover_mem_protect(self.addr, JMP_INST_SIZE, old_prot);
             ret?;
         } else {
-            modify_jmp_with_thread_cb(&self, stub.as_ptr() as usize)?;
+            modify_jmp_with_thread_cb(&self, stub.addr as usize)?;
         }
         Ok(HookPoint {
             addr: self.addr,
             stub,
-            stub_prot,
             origin,
             thread_cb: self.thread_cb,
             flags: self.flags,
@@ -296,7 +291,6 @@ impl HookPoint {
         } else {
             ret = recover_jmp_with_thread_cb(&self)
         }
-        recover_mem_protect(self.stub.as_ptr() as usize, self.stub.len(), self.stub_prot);
         ret
     }
 }
@@ -720,11 +714,40 @@ fn generate_jmp_ret_stub(
     Ok((ori_func_addr_off, ori_func_off))
 }
 
+fn relocate_addr(
+    buf: Pin<&mut [u8]>,
+    rel_tbl: Vec<RelocEntry>,
+    addr_to_write: u16,
+    moved_code_off: u16,
+) -> Result<(), HookError> {
+    let buf = unsafe { Pin::get_unchecked_mut(buf) };
+    let buf_addr = buf.as_ptr() as usize as u64;
+    let mut ret: Result<(), HookError> = Ok(());
+    rel_tbl.iter().for_each(|ent| {
+        let relative_addr =
+            ent.dest_addr as i64 - (buf_addr as i64 + ent.off as i64 + ent.reloc_base_off as i64);
+        if relative_addr as i32 as i64 != relative_addr {
+            ret = Err(HookError::Unknown);
+            return;
+        }
+
+        let off = ent.off as usize;
+        buf[off..off + 4].copy_from_slice(&(relative_addr as i32).to_le_bytes());
+    });
+
+    if addr_to_write != 0 {
+        let addr_to_write = addr_to_write as usize;
+        buf[addr_to_write..addr_to_write + 4]
+            .copy_from_slice(&(buf_addr + moved_code_off as u64).to_le_bytes());
+    }
+    Ok(())
+}
+
 fn generate_stub(
     hooker: &Hooker,
     moved_code: Vec<Inst>,
     ori_len: u8,
-) -> Result<Pin<Box<[u8]>>, HookError> {
+) -> Result<FixedMemory, HookError> {
     let mut rel_tbl = Vec::<RelocEntry>::new();
     let mut buf = Cursor::new(Vec::<u8>::with_capacity(240));
 
@@ -750,130 +773,12 @@ fn generate_stub(
             generate_jmp_ret_stub(&mut buf, &mut rel_tbl, moved_code, hooker.addr, cb, ori_len)?
         }
     };
-
-    Err(HookError::Unknown)
-}
-
-struct FixedMemory {
-    addr: u64,
-    len: u32,
-}
-enum QueryResult {
-    Success(u64),
-    NotUsable(u64),
-    Fail,
-}
-impl Drop for FixedMemory {
-    fn drop(&mut self) {
-        unsafe { VirtualFree(self.addr as LPVOID, 0, MEM_RELEASE) };
-    }
-}
-impl FixedMemory {
-    fn allocate(hook_addr: u64, rel_tbl: &Vec<RelocEntry>) -> Result<Self, HookError> {
-        let bound = rel_tbl
-            .iter()
-            .fold(Bound::new(hook_addr), |b, ent| b.to_new(ent.dest_addr));
-        bound.check()?;
-        let addr = FixedMemory::allocate_internal(&bound)?;
-
-        Ok(Self { addr, len: 4096 })
-    }
-
-    fn query_and_alloc(addr: u64) -> QueryResult {
-        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { MaybeUninit::uninit().assume_init() };
-        let ret = unsafe {
-            VirtualQuery(
-                addr as LPVOID,
-                &mut mbi,
-                size_of::<MEMORY_BASIC_INFORMATION>(),
-            )
-        };
-        if ret == 0 {
-            QueryResult::Fail
-        } else if mbi.State == MEM_FREE && mbi.RegionSize >= 4096 {
-            let mem =
-                unsafe { VirtualAlloc(mbi.BaseAddress, 4096, MEM_COMMIT, PAGE_EXECUTE_READWRITE) };
-            QueryResult::Success(mem as usize as u64)
-        } else {
-            QueryResult::NotUsable(mbi.RegionSize as u64)
-        }
-    }
-
-    fn allocate_internal(bnd: &Bound) -> Result<u64, HookError> {
-        let nb = bnd.clone();
-        let mut cur_addr = nb.middle();
-        while cur_addr < nb.max {
-            match FixedMemory::query_and_alloc(cur_addr) {
-                QueryResult::Success(addr) => {
-                    return Ok(addr);
-                }
-                QueryResult::NotUsable(size) => {
-                    cur_addr += if size > 0 { size } else { 4096 };
-                }
-                QueryResult::Fail => {
-                    return Err(HookError::MemoryAllocation);
-                }
-            }
-        }
-        cur_addr = nb.middle();
-        while cur_addr > nb.min {
-            match FixedMemory::query_and_alloc(cur_addr) {
-                QueryResult::Success(addr) => {
-                    return Ok(addr);
-                }
-                QueryResult::NotUsable(size) => {
-                    cur_addr = size.checked_sub(4096).unwrap_or(0);
-                }
-                QueryResult::Fail => {
-                    return Err(HookError::MemoryAllocation);
-                }
-            }
-        }
-        Err(HookError::MemoryAllocation)
-    }
-}
-
-#[derive(Clone)]
-struct Bound {
-    min: u64,
-    max: u64,
-}
-
-impl Bound {
-    fn new(init_addr: u64) -> Self {
-        Self {
-            min: init_addr.checked_sub(i32::max_value() as u64).unwrap_or(0),
-            max: init_addr
-                .checked_add(i32::max_value() as u64)
-                .unwrap_or(u64::max_value()),
-        }
-    }
-
-    fn to_new(self, dest: u64) -> Self {
-        Self {
-            min: cmp::max(
-                self.min,
-                dest.checked_sub(i32::max_value() as u64).unwrap_or(0),
-            ),
-            max: cmp::min(
-                self.max,
-                dest.checked_add(i32::max_value() as u64)
-                    .unwrap_or(u64::max_value()),
-            ),
-        }
-    }
-
-    fn check(&self) -> Result<(), HookError> {
-        if self.min > self.max {
-            Err(HookError::InvalidParameter)
-        } else {
-            Ok(())
-        }
-    }
-
-    fn middle(&self) -> u64 {
-        self.min / 2 + self.max / 2
-    }
+    let fix_mem = FixedMemory::allocate(hooker.addr as u64, &rel_tbl)?;
+    let p = unsafe {
+        slice::from_raw_parts_mut(fix_mem.addr as usize as *mut u8, fix_mem.len as usize)
+    };
+    relocate_addr(Pin::new(p), rel_tbl, ori_func_addr_off, ori_func_off)?;
+    Ok(fix_mem)
 }
 
 #[cfg(windows)]
