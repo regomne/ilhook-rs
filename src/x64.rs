@@ -255,7 +255,7 @@ impl Hooker {
     /// 3. Set `NOT_MODIFY_MEMORY_PROTECT` where it should not be set.
     /// 4. hook or unhook from 2 or more threads at the same time without `HookFlags::NOT_MODIFY_MEMORY_PROTECT`. Because of memory protection colliding.
     /// 5. Other unpredictable errors.
-    pub fn hook(self) -> Result<HookPoint, HookError> {
+    pub unsafe fn hook(self) -> Result<HookPoint, HookError> {
         let (moved_code, origin) = generate_moved_code(self.addr)?;
         let stub = generate_stub(&self, moved_code, origin.len)?;
         if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
@@ -737,7 +737,7 @@ fn relocate_addr(
 
     if addr_to_write != 0 {
         let addr_to_write = addr_to_write as usize;
-        buf[addr_to_write..addr_to_write + 4]
+        buf[addr_to_write..addr_to_write + 8]
             .copy_from_slice(&(buf_addr + moved_code_off as u64).to_le_bytes());
     }
     Ok(())
@@ -924,6 +924,7 @@ mod tests {
         let inst = [0xe3, 0x02];
         let addr = inst.as_ptr() as usize;
         let new_inst = move_inst(&inst);
+        assert_eq!(new_inst.bytes[0..1], [0xe3]);
         assert_eq!(new_inst.reloc_addr, (addr + 4) as u64);
         assert_eq!(new_inst.len, 9);
         assert_eq!(new_inst.reloc_off, 5);
@@ -935,8 +936,89 @@ mod tests {
         let inst = [0x48, 0x8b, 0x05, 0x01, 0x00, 0x00, 0x00];
         let addr = inst.as_ptr() as usize;
         let new_inst = move_inst(&inst);
+        assert_eq!(new_inst.bytes[..7], inst);
         assert_eq!(new_inst.reloc_addr, (addr + 8) as u64);
         assert_eq!(new_inst.len, 7);
         assert_eq!(new_inst.reloc_off, 3);
+    }
+
+    #[test]
+    fn test_fixed_mem() {
+        use super::fixed_memory::FixedMemory;
+        let rel: Vec<RelocEntry> = vec![];
+        let m = FixedMemory::allocate(0x7fffffff, &rel);
+        assert!(m.is_ok());
+        let m = m.unwrap();
+        assert_ne!(m.addr, 0);
+        assert_eq!(m.len, 4096);
+    }
+
+    #[test]
+    fn test_relocate_addr() {
+        let b: Box<[u8]> =
+            vec![3, 0, 0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 2, 0, 0, 0].into_boxed_slice();
+        let mut p = Pin::new(b);
+        let addr = p.as_ptr() as usize as i64;
+        let rel_tbl: Vec<RelocEntry> = vec![
+            RelocEntry {
+                off: 9,
+                reloc_base_off: 5,
+                dest_addr: (addr as u64) + 10,
+            },
+            RelocEntry {
+                off: 14,
+                reloc_base_off: 4,
+                dest_addr: (addr as u64) + 100,
+            },
+        ];
+        relocate_addr(p.as_mut(), rel_tbl, 1, 9).unwrap();
+        let off1 = (addr + 9).to_le_bytes();
+        let off2 = ((addr + 10 - (addr + 14)) as i32).to_le_bytes();
+        let off3 = ((addr + 100 - (addr + 18)) as i32).to_le_bytes();
+        let b: Vec<&u8> = [3]
+            .iter()
+            .chain(off1.iter())
+            .chain(off2.iter())
+            .chain(&[0])
+            .chain(off3.iter())
+            .collect();
+        assert_eq!(p.iter().cmp(b.iter().cloned()), std::cmp::Ordering::Equal);
+    }
+    #[test]
+    fn test_generate_code() {
+        let b: Box<[u8]> = vec![0x54, 0x89, 0x05, 0x01, 0x00, 0x00, 0x00].into_boxed_slice();
+        let p = Pin::new(b);
+        let addr = p.as_ptr() as usize;
+        let (moved_code, origin) = generate_moved_code(addr).unwrap();
+        assert_eq!(moved_code.len(), 2);
+        assert_eq!(moved_code[0].len, 1);
+        assert_eq!(moved_code[1].len, 6);
+        assert_eq!(moved_code[1].reloc_off, 2);
+        assert_eq!(moved_code[1].reloc_addr, addr as u64 + 8);
+        assert_eq!(origin.len, 7);
+        assert_eq!(origin.buf[..7], [0x54, 0x89, 0x05, 0x01, 0x00, 0x00, 0x00]);
+    }
+    #[cfg(test)]
+    fn foo(x: u64) -> u64 {
+        x * x
+    }
+    #[cfg(test)]
+    unsafe extern "C" fn on_foo(reg: *mut Registers, old_func: usize, _: usize) -> usize {
+        let old_func = std::mem::transmute::<usize, fn(u64) -> u64>(old_func);
+        old_func((*reg).get_arg(1)) as usize + 3
+    }
+    #[test]
+    fn test_hook_function() {
+        assert_eq!(foo(5), 25);
+        let hooker = Hooker::new(
+            foo as usize,
+            HookType::Retn(on_foo),
+            CallbackOption::None,
+            HookFlags::empty(),
+        );
+        let info = unsafe { hooker.hook().unwrap() };
+        assert_eq!(foo(5), 28);
+        unsafe { info.unhook().unwrap() };
+        assert_eq!(foo(5), 25);
     }
 }

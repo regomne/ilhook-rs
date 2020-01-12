@@ -3,7 +3,10 @@ use super::*;
 #[cfg(windows)]
 use winapi::shared::minwindef::LPVOID;
 #[cfg(windows)]
+use winapi::um::errhandlingapi::GetLastError;
+#[cfg(windows)]
 use winapi::um::memoryapi::{VirtualAlloc, VirtualFree, VirtualQuery};
+use winapi::um::winnt::MEM_RESERVE;
 #[cfg(windows)]
 use winapi::um::winnt::{
     MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_FREE, MEM_RELEASE, PAGE_EXECUTE_READWRITE,
@@ -11,7 +14,7 @@ use winapi::um::winnt::{
 
 enum QueryResult {
     Success(u64),
-    NotUsable(u64),
+    NotUsable(u64, u64),
     Fail,
 }
 
@@ -48,11 +51,23 @@ impl FixedMemory {
         if ret == 0 {
             QueryResult::Fail
         } else if mbi.State == MEM_FREE && mbi.RegionSize >= 4096 {
-            let mem =
-                unsafe { VirtualAlloc(mbi.BaseAddress, 4096, MEM_COMMIT, PAGE_EXECUTE_READWRITE) };
-            QueryResult::Success(mem as usize as u64)
+            let mem = unsafe {
+                VirtualAlloc(
+                    mbi.BaseAddress,
+                    4096,
+                    MEM_COMMIT | MEM_RESERVE,
+                    PAGE_EXECUTE_READWRITE,
+                )
+            };
+            if mem == std::ptr::null_mut() {
+                let err = unsafe { GetLastError() };
+                println!("reason:{}", err);
+                QueryResult::NotUsable(mbi.BaseAddress as usize as u64, mbi.RegionSize as u64)
+            } else {
+                QueryResult::Success(mem as usize as u64)
+            }
         } else {
-            QueryResult::NotUsable(mbi.RegionSize as u64)
+            QueryResult::NotUsable(mbi.BaseAddress as usize as u64, mbi.RegionSize as u64)
         }
     }
 
@@ -64,7 +79,7 @@ impl FixedMemory {
                 QueryResult::Success(addr) => {
                     return Ok(addr);
                 }
-                QueryResult::NotUsable(size) => {
+                QueryResult::NotUsable(_, size) => {
                     cur_addr += if size > 0 { size } else { 4096 };
                 }
                 QueryResult::Fail => {
@@ -78,8 +93,8 @@ impl FixedMemory {
                 QueryResult::Success(addr) => {
                     return Ok(addr);
                 }
-                QueryResult::NotUsable(size) => {
-                    cur_addr = size.checked_sub(4096).unwrap_or(0);
+                QueryResult::NotUsable(base, _) => {
+                    cur_addr = base.checked_sub(4096).unwrap_or(0);
                 }
                 QueryResult::Fail => {
                     return Err(HookError::MemoryAllocation);
