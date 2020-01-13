@@ -3,13 +3,11 @@ use super::*;
 #[cfg(windows)]
 use winapi::shared::minwindef::LPVOID;
 #[cfg(windows)]
-use winapi::um::errhandlingapi::GetLastError;
-#[cfg(windows)]
 use winapi::um::memoryapi::{VirtualAlloc, VirtualFree, VirtualQuery};
-use winapi::um::winnt::MEM_RESERVE;
 #[cfg(windows)]
 use winapi::um::winnt::{
-    MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_FREE, MEM_RELEASE, PAGE_EXECUTE_READWRITE,
+    MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_FREE, MEM_RELEASE, MEM_RESERVE,
+    PAGE_EXECUTE_READWRITE,
 };
 
 enum QueryResult {
@@ -60,8 +58,6 @@ impl FixedMemory {
                 )
             };
             if mem == std::ptr::null_mut() {
-                let err = unsafe { GetLastError() };
-                println!("reason:{}", err);
                 QueryResult::NotUsable(mbi.BaseAddress as usize as u64, mbi.RegionSize as u64)
             } else {
                 QueryResult::Success(mem as usize as u64)

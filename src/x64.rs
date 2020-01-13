@@ -777,6 +777,8 @@ fn generate_stub(
     let p = unsafe {
         slice::from_raw_parts_mut(fix_mem.addr as usize as *mut u8, fix_mem.len as usize)
     };
+    let buf = buf.into_inner().into_boxed_slice();
+    p[..buf.len()].copy_from_slice(&buf);
     relocate_addr(Pin::new(p), rel_tbl, ori_func_addr_off, ori_func_off)?;
     Ok(fix_mem)
 }
@@ -805,8 +807,11 @@ fn modify_jmp(dest_addr: usize, stub_addr: usize) -> Result<(), HookError> {
     let buf = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, JMP_INST_SIZE) };
     // jmp stub_addr
     buf[0] = 0xe9;
-    let rel_off = stub_addr as i32 - (dest_addr as i32 + 5);
-    buf[1..5].copy_from_slice(&rel_off.to_le_bytes());
+    let rel_off = stub_addr as i64 - (dest_addr as i64 + 5);
+    if rel_off as i32 as i64 != rel_off {
+        return Err(HookError::Unknown);
+    }
+    buf[1..5].copy_from_slice(&(rel_off as i32).to_le_bytes());
     Ok(())
 }
 

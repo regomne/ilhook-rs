@@ -12,6 +12,7 @@ pub enum HookError {
     #[error("memory protect error, code:{0}")]
     MemoryProtect(u32),
 
+    /// Can't allocate memory
     #[error("memory allocation error")]
     MemoryAllocation,
 
