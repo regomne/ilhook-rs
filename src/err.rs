@@ -16,6 +16,10 @@ pub enum HookError {
     #[error("memory allocation error")]
     MemoryAllocation,
 
+    /// Can't get memory layout from /proc/${PID}/maps (only in linux)
+    #[error("memory layout format error")]
+    MemoryLayoutFormat,
+
     /// Can't disassemble in the specified address
     #[error("disassemble error")]
     Disassemble,

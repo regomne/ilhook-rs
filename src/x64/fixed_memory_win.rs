@@ -1,10 +1,7 @@
 use super::*;
 
-#[cfg(windows)]
 use winapi::shared::minwindef::LPVOID;
-#[cfg(windows)]
 use winapi::um::memoryapi::{VirtualAlloc, VirtualFree, VirtualQuery};
-#[cfg(windows)]
 use winapi::um::winnt::{
     MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_FREE, MEM_RELEASE, MEM_RESERVE,
     PAGE_EXECUTE_READWRITE,

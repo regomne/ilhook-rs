@@ -12,12 +12,17 @@ use winapi::shared::minwindef::LPVOID;
 use winapi::um::errhandlingapi::GetLastError;
 #[cfg(windows)]
 use winapi::um::memoryapi::VirtualProtect;
-
-mod fixed_memory;
-use fixed_memory::FixedMemory;
+#[cfg(windows)]
+mod fixed_memory_win;
+#[cfg(windows)]
+use fixed_memory_win::FixedMemory;
 
 #[cfg(unix)]
 use libc::{__errno_location, c_void, mprotect, sysconf};
+//#[cfg(unix)]
+mod fixed_memory_unix;
+#[cfg(unix)]
+use fixed_memory_unix::FixedMemory;
 
 use crate::err::HookError;
 
