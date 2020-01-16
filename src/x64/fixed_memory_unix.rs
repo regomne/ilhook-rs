@@ -30,7 +30,7 @@ impl FixedMemory {
         bound.check()?;
         let block = MemoryLayout::read_self_mem_layout()?.find_memory_with_bound(&bound)?;
         let len = block.end - block.begin;
-        let addr = unsafe {
+        let mut addr = unsafe {
             mmap(
                 block.begin as *mut c_void,
                 len as usize,
@@ -40,24 +40,27 @@ impl FixedMemory {
                 0,
             )
         } as usize as u64;
-        if addr == -1 as i64 as u64 {
-            let err = unsafe { *(__errno_location()) };
-            //if err == 95 {}
-            Err(HookError::MemoryProtect(err as u32))
-        } else if addr != block.begin {
-            if block.begin >= bound.min && block.end <= bound.max {
-                Ok(Self {
-                    addr,
-                    len: len as u32,
-                })
-            } else {
-                Err(HookError::MemoryProtect(0))
-            }
-        } else {
-            Ok(Self {
+        if addr == u64::max_value() && unsafe { *(__errno_location()) } == 95 {
+            addr = unsafe {
+                mmap(
+                    block.begin as *mut c_void,
+                    len as usize,
+                    7,
+                    MAP_PRIVATE | MAP_ANONYMOUS,
+                    -1,
+                    0,
+                )
+            };
+        }
+        match addr {
+            u64::max_value() => Err(HookError::MemoryProtect(
+                unsafe { *(__errno_location()) } as u32
+            )),
+            x if x != block.begin && x >= bound.min && x + len <= bound.max => Ok(Self {
                 addr,
                 len: len as u32,
-            })
+            }),
+            _ => Err(HookError::MemoryProtect(0)),
         }
     }
 }
