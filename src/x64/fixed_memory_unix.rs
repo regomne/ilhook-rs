@@ -1,31 +1,130 @@
 use super::*;
+use lazy_static::lazy_static;
+use regex::Regex;
 use std::format;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::process;
 
-struct MemoryBlock {
-    addr: u64,
-    len: u64,
+use libc::{
+    __errno_location, c_void, mmap, munmap, sysconf, MAP_ANONYMOUS, MAP_FIXED_NOREPLACE,
+    MAP_PRIVATE,
+};
+
+pub(super) struct FixedMemory {
+    pub addr: u64,
+    pub len: u32,
 }
-impl MemoryBlock {
-    fn from_string(s: String) -> Result<Self, HookError> {
-        Err(HookError::MemoryLayoutFormat)
+
+impl Drop for FixedMemory {
+    fn drop(&mut self) {
+        unsafe { munmap(self.addr as *mut c_void, self.len as usize) };
     }
 }
 
-fn read_self_mem_layout() -> Result<Vec<MemoryBlock>, HookError> {
-    let maps_path = format!("/proc/{}/maps", process::id());
-    let maps = File::open(maps_path)?;
-    let reader = BufReader::new(maps);
+impl FixedMemory {
+    pub fn allocate(hook_addr: u64, rel_tbl: &Vec<RelocEntry>) -> Result<Self, HookError> {
+        let bound = rel_tbl
+            .iter()
+            .fold(Bound::new(hook_addr), |b, ent| b.to_new(ent.dest_addr));
+        bound.check()?;
+        let block = MemoryLayout::read_self_mem_layout()?.find_memory_with_bound(&bound)?;
+        let len = block.end - block.begin;
+        let addr = unsafe {
+            mmap(
+                block.begin as *mut c_void,
+                len as usize,
+                7,
+                MAP_PRIVATE | MAP_FIXED_NOREPLACE | MAP_ANONYMOUS,
+                -1,
+                0,
+            )
+        } as usize as u64;
+        if addr == -1 as i64 as u64 {
+            let err = unsafe { *(__errno_location()) };
+            //if err == 95 {}
+            Err(HookError::MemoryProtect(err as u32))
+        } else if addr != block.begin {
+            if block.begin >= bound.min && block.end <= bound.max {
+                Ok(Self {
+                    addr,
+                    len: len as u32,
+                })
+            } else {
+                Err(HookError::MemoryProtect(0))
+            }
+        } else {
+            Ok(Self {
+                addr,
+                len: len as u32,
+            })
+        }
+    }
+}
 
-    reader
-        .lines()
-        .map(|line| {
-            line.map_err(|e| HookError::MemoryLayoutFormat)
-                .and_then(|s| MemoryBlock::from_string(s))
-        })
-        .collect()
+struct MemoryLayout(Vec<MemoryBlock>);
+
+impl MemoryLayout {
+    fn read_self_mem_layout() -> Result<Self, HookError> {
+        let maps = File::open(format!("/proc/{}/maps", process::id()))?;
+        BufReader::new(maps)
+            .lines()
+            .map(|line| {
+                line.map_err(|_| HookError::MemoryLayoutFormat)
+                    .and_then(|s| MemoryBlock::from_string(s))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(|v| Self(v))
+    }
+
+    fn find_memory_with_bound(&self, bnd: &Bound) -> Result<MemoryBlock, HookError> {
+        let page_size = unsafe { sysconf(30) } as u64; //_SC_PAGESIZE == 30
+        let blocks = &self.0;
+        if blocks.len() == 0 {
+            return Err(HookError::MemoryAllocation);
+        }
+        // test the first block
+        if blocks[0].begin > page_size * 2 && bnd.min <= page_size {
+            return Ok(MemoryBlock {
+                begin: page_size,
+                end: page_size * 2,
+            });
+        }
+        for i in 1..blocks.len() {
+            let gap = blocks[i].begin - blocks[i - 1].end;
+            if gap >= page_size && blocks[i - 1].end >= bnd.min && blocks[i].begin < bnd.max {
+                return Ok(MemoryBlock {
+                    begin: blocks[i - 1].end,
+                    end: blocks[i - 1].end + page_size,
+                });
+            }
+        }
+        Err(HookError::MemoryAllocation)
+    }
+}
+
+#[derive(Debug)]
+struct MemoryBlock {
+    begin: u64,
+    end: u64,
+}
+impl MemoryBlock {
+    fn from_string(s: String) -> Result<Self, HookError> {
+        lazy_static! {
+            static ref RE: Regex = Regex::new("^([a-fA-F0-9]+)-([a-fA-F0-9]+)").unwrap();
+        }
+        //let RE = Regex::new("").unwrap();
+        RE.captures(&s)
+            .ok_or(HookError::MemoryLayoutFormat)
+            .and_then(|cap| {
+                let begin = cap.get(1).unwrap().as_str();
+                let end = cap.get(2).unwrap().as_str();
+                Ok(Self {
+                    begin: u64::from_str_radix(begin, 16).or(Err(HookError::MemoryLayoutFormat))?,
+                    end: u64::from_str_radix(end, 16).or(Err(HookError::MemoryLayoutFormat))?,
+                })
+            })
+    }
 }
 
 #[derive(Clone)]
@@ -64,9 +163,5 @@ impl Bound {
         } else {
             Ok(())
         }
-    }
-
-    fn middle(&self) -> u64 {
-        self.min / 2 + self.max / 2
     }
 }

@@ -1,5 +1,6 @@
 use super::*;
 
+use std::mem::{size_of, MaybeUninit};
 use winapi::shared::minwindef::LPVOID;
 use winapi::um::memoryapi::{VirtualAlloc, VirtualFree, VirtualQuery};
 use winapi::um::winnt::{
@@ -65,9 +66,8 @@ impl FixedMemory {
     }
 
     fn allocate_internal(bnd: &Bound) -> Result<u64, HookError> {
-        let nb = bnd.clone();
-        let mut cur_addr = nb.middle();
-        while cur_addr < nb.max {
+        let mut cur_addr = bnd.middle();
+        while cur_addr < bnd.max {
             match FixedMemory::query_and_alloc(cur_addr) {
                 QueryResult::Success(addr) => {
                     return Ok(addr);
@@ -80,8 +80,8 @@ impl FixedMemory {
                 }
             }
         }
-        cur_addr = nb.middle();
-        while cur_addr > nb.min {
+        cur_addr = bnd.middle();
+        while cur_addr > bnd.min {
             match FixedMemory::query_and_alloc(cur_addr) {
                 QueryResult::Success(addr) => {
                     return Ok(addr);
