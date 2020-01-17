@@ -17,6 +17,8 @@ bitflags = "1.2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+regex = "1"
+lazy_static = "1"
 
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["memoryapi", "minwindef", "errhandlingapi"] }
+winapi = { version = "0.3", features = ["memoryapi", "minwindef", "errhandlingapi", "winnt"] }

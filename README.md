@@ -8,8 +8,6 @@ This crate provides methods to inline hook binary codes of `x86` and `x64` instr
 
 HOOK is a mechanism that intercepts function calls and handles them by user-defined code.
 
-Ilhook supports hooking x86 codes currently, and x64 supporting will be soon.
-
 # Installation
 
 This crate works with Cargo and is on
@@ -82,8 +80,7 @@ let hooker = Hooker::new(
     CallbackOption::None,
     HookFlags::empty(),
 );
-//commented as hooking is not supported in doc tests
-//hooker.hook().unwrap();
+hooker.hook().unwrap();
 ```
 
 Then check_serial_number will always go to the successful path.
@@ -96,7 +93,7 @@ function. Note that you should only hook at the beginning of a function.
 Assume we have a function:
 
 ```rust
-fn foo(x: u32) -> u32 {
+fn foo(x: u64) -> u64 {
     x * x
 }
 
@@ -108,24 +105,24 @@ And you want to let it return `x*x+3`, which means foo(5)==28.
 Now let's hook:
 
 ```rust
-unsafe extern "C" fn new_foo(
+use ilhook::x64::{Hooker, HookType, Registers, CallbackOption, HookFlags};
+unsafe extern "sysv64" fn new_foo(
     reg: *mut Registers,
     _ :usize,
     _ :usize
 ) -> usize {
-    let x = (*reg).get_arg(1) as usize;
+    let x = (&*reg).rdi as usize;
     x * x + 3
 }
 
 let hooker = Hooker::new(
     foo as usize,
-    HookType::Retn(0, new_foo),
+    HookType::Retn(new_foo),
     CallbackOption::None,
     HookFlags::empty(),
 );
 unsafe { hooker.hook().unwrap() };
-//commented as hooking is not supported in doc tests
-//assert_eq!(foo(5), 28);
+assert_eq!(foo(5), 28);
 ```
 
 ## Jmp-addr hook
