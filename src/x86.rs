@@ -1,3 +1,4 @@
+use bitflags::bitflags;
 use capstone::arch::x86::X86OperandType;
 use capstone::arch::ArchOperand;
 use capstone::prelude::*;
@@ -196,6 +197,13 @@ pub struct HookPoint {
     flags: HookFlags,
 }
 
+#[cfg(not(target_arch = "x86"))]
+fn env_lock() {
+    panic!("This crate should only be used in arch x86_32!")
+}
+#[cfg(target_arch = "x86")]
+fn env_lock() {}
+
 impl Hooker {
     /// Create a new Hooker.
     ///
@@ -211,6 +219,7 @@ impl Hooker {
         thread_cb: CallbackOption,
         flags: HookFlags,
     ) -> Self {
+        env_lock();
         Self {
             addr,
             hook_type,
@@ -233,7 +242,7 @@ impl Hooker {
     /// 6. Other unpredictable errors.
     pub unsafe fn hook(self) -> Result<HookPoint, HookError> {
         let (moved, origin) = generate_moved_code(self.addr)?;
-        let stub = generate_stub(&self, &moved, origin.len)?;
+        let stub = generate_stub(&self, moved, origin.len)?;
         let stub_prot = modify_mem_protect(stub.as_ptr() as usize, stub.len())?;
         if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
             let old_prot = modify_mem_protect(self.addr, JMP_INST_SIZE)?;
@@ -476,7 +485,7 @@ fn relocate_addr(
 fn generate_jmp_back_stub(
     buf: &mut Cursor<Vec<u8>>,
     rel_tbl: &mut Vec<RelocEntry>,
-    moved_code: &Vec<Inst>,
+    moved_code: Vec<Inst>,
     ori_addr: usize,
     cb: JmpBackRoutine,
     ori_len: u8,
@@ -509,7 +518,7 @@ fn generate_jmp_back_stub(
 fn generate_retn_stub(
     buf: &mut Cursor<Vec<u8>>,
     rel_tbl: &mut Vec<RelocEntry>,
-    moved_code: &Vec<Inst>,
+    moved_code: Vec<Inst>,
     ori_addr: usize,
     retn_val: u16,
     cb: RetnRoutine,
@@ -556,7 +565,7 @@ fn generate_retn_stub(
 fn generate_jmp_addr_stub(
     buf: &mut Cursor<Vec<u8>>,
     rel_tbl: &mut Vec<RelocEntry>,
-    moved_code: &Vec<Inst>,
+    moved_code: Vec<Inst>,
     ori_addr: usize,
     dest_addr: usize,
     cb: JmpToAddrRoutine,
@@ -596,7 +605,7 @@ fn generate_jmp_addr_stub(
 fn generate_jmp_ret_stub(
     buf: &mut Cursor<Vec<u8>>,
     rel_tbl: &mut Vec<RelocEntry>,
-    moved_code: &Vec<Inst>,
+    moved_code: Vec<Inst>,
     ori_addr: usize,
     cb: JmpToRetRoutine,
     ori_len: u8,
@@ -636,7 +645,7 @@ fn generate_jmp_ret_stub(
 
 fn generate_stub(
     hooker: &Hooker,
-    moved_code: &Vec<Inst>,
+    moved_code: Vec<Inst>,
     ori_len: u8,
 ) -> Result<Pin<Box<[u8]>>, HookError> {
     let mut rel_tbl = Vec::<RelocEntry>::new();
@@ -647,18 +656,13 @@ fn generate_stub(
     buf.write(&[0x60, 0x9c, 0x8b, 0xec])?;
 
     let (ori_func_addr_off, ori_func_off) = match hooker.hook_type {
-        HookType::JmpBack(cb) => generate_jmp_back_stub(
-            &mut buf,
-            &mut rel_tbl,
-            &moved_code,
-            hooker.addr,
-            cb,
-            ori_len,
-        ),
+        HookType::JmpBack(cb) => {
+            generate_jmp_back_stub(&mut buf, &mut rel_tbl, moved_code, hooker.addr, cb, ori_len)
+        }
         HookType::Retn(val, cb) => generate_retn_stub(
             &mut buf,
             &mut rel_tbl,
-            &moved_code,
+            moved_code,
             hooker.addr,
             val as u16,
             cb,
@@ -667,20 +671,15 @@ fn generate_stub(
         HookType::JmpToAddr(dest, cb) => generate_jmp_addr_stub(
             &mut buf,
             &mut rel_tbl,
-            &moved_code,
+            moved_code,
             hooker.addr,
             dest,
             cb,
             ori_len,
         ),
-        HookType::JmpToRet(cb) => generate_jmp_ret_stub(
-            &mut buf,
-            &mut rel_tbl,
-            &moved_code,
-            hooker.addr,
-            cb,
-            ori_len,
-        ),
+        HookType::JmpToRet(cb) => {
+            generate_jmp_ret_stub(&mut buf, &mut rel_tbl, moved_code, hooker.addr, cb, ori_len)
+        }
     }?;
 
     let mut p = Pin::new(buf.into_inner().into_boxed_slice());

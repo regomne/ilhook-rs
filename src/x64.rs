@@ -1,3 +1,4 @@
+use bitflags::bitflags;
 use capstone::arch::{x86::X86OperandType, ArchOperand};
 use capstone::prelude::*;
 use std::cmp;
@@ -218,6 +219,13 @@ pub struct HookPoint {
     flags: HookFlags,
 }
 
+#[cfg(not(target_arch = "x86_64"))]
+fn env_lock() {
+    panic!("This crate should only be used in arch x86_32!")
+}
+#[cfg(target_arch = "x86_64")]
+fn env_lock() {}
+
 impl Hooker {
     /// Create a new Hooker.
     ///
@@ -233,6 +241,7 @@ impl Hooker {
         thread_cb: CallbackOption,
         flags: HookFlags,
     ) -> Self {
+        env_lock();
         Self {
             addr,
             hook_type,

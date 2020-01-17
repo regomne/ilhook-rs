@@ -17,6 +17,13 @@ matrix:
                   - libc6:i386
                   - libstdc++6:i386
                   - g++-multilib
+    - rust: stable
+      env: TARGET=x86_64-pc-windows-msvc
+      os: windows
+    - rust: stable
+      env: TARGET=x86_64-unknown-linux-gnu
+      os: linux
+      dist: trusty
 install: rustup target add ${TARGET}
 script:
     - cargo build --verbose --target=${TARGET}

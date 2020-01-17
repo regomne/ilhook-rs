@@ -13,7 +13,7 @@ like so:
 
 ```toml
 [dependencies]
-ilhook = "0.1"
+ilhook = "0.2"
 ```
 
 # Hook Types
@@ -140,17 +140,12 @@ As rust's test run parrallelly, it may crash if not specify `--test-threads=1`.
 
 #![warn(missing_docs)]
 
-#[macro_use]
-extern crate bitflags;
-
 mod err;
 
 pub use err::HookError;
 
 /// The x86 hooker
-//#[cfg(target_arch = "x86")]
 pub mod x86;
 
 /// The x64 hooker
-//#[cfg(target_arch = "x86_64")]
 pub mod x64;
