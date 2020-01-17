@@ -98,7 +98,6 @@ impl FixedMemory {
     }
 }
 
-#[derive(Clone)]
 struct Bound {
     min: u64,
     max: u64,

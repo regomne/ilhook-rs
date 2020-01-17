@@ -61,13 +61,16 @@ And it compiles to the asm code:
 Now let's start:
 
 ```rust
+# #[cfg(target_arch = "x86")]
 use ilhook::x86::{Hooker, HookType, Registers, CallbackOption, HookFlags};
 
+# #[cfg(target_arch = "x86")]
 unsafe extern "C" fn on_check_sn(reg:*mut Registers, _:usize){
     println!("machine_hash: {}, sn_hash: {}", (*reg).ebx, (*reg).eax);
     (*reg).eax = (*reg).ebx; //we modify the sn_hash!
 }
 
+# #[cfg(target_arch = "x86")]
 let hooker=Hooker::new(0x40107F, HookType::JmpBack(on_check_sn), CallbackOption::None, HookFlags::empty());
 //hooker.hook().unwrap(); //commented as hooking is not supported in doc tests
 ```
@@ -82,7 +85,7 @@ function. Note that you should only hook at the beginning of a function.
 Assume we have a function:
 
 ```rust
-fn foo(x: u32) -> u32 {
+fn foo(x: u64) -> u64 {
     x * x
 }
 
@@ -94,16 +97,20 @@ And you want to let it return `x*x+3`, which means foo(5)==28.
 Now let's hook:
 
 ```rust
-# use ilhook::x86::{Hooker, HookType, Registers, CallbackOption, HookFlags};
-# fn foo(x: u32) -> u32 {
+# #[cfg(target_arch = "x86_64")]
+# use ilhook::x64::{Hooker, HookType, Registers, CallbackOption, HookFlags};
+# #[cfg(target_arch = "x86_64")]
+# fn foo(x: u64) -> u64 {
 #     x * x
 # }
-unsafe extern "C" fn new_foo(reg:*mut Registers, _:usize, _:usize)->usize{
-    let x = (*reg).get_arg(1) as usize;
+# #[cfg(target_arch = "x86_64")]
+unsafe extern "sysv64" fn new_foo(reg:*mut Registers, _:usize, _:usize)->usize{
+    let x = (&*reg).rdi as usize;
     x*x+3
 }
 
-let hooker=Hooker::new(foo as usize, HookType::Retn(0, new_foo), CallbackOption::None, HookFlags::empty());
+# #[cfg(target_arch = "x86_64")]
+let hooker=Hooker::new(foo as usize, HookType::Retn(new_foo), CallbackOption::None, HookFlags::empty());
 unsafe{hooker.hook().unwrap()};
 //assert_eq!(foo(5), 28); //commented as hooking is not supported in doc tests
 ```

@@ -40,6 +40,7 @@ impl FixedMemory {
                 0,
             )
         } as usize as u64;
+        // If kernel doesn't support MAP_FIXED_NOREPLACE
         if addr == u64::max_value() && unsafe { *(__errno_location()) } == 95 {
             addr = unsafe {
                 mmap(
@@ -50,13 +51,13 @@ impl FixedMemory {
                     -1,
                     0,
                 )
-            };
+            } as usize as u64;
         }
         match addr {
-            u64::max_value() => Err(HookError::MemoryProtect(
+            0xffffffffffffffff => Err(HookError::MemoryProtect(
                 unsafe { *(__errno_location()) } as u32
             )),
-            x if x != block.begin && x >= bound.min && x + len <= bound.max => Ok(Self {
+            x if x == block.begin || (x >= bound.min && x + len <= bound.max) => Ok(Self {
                 addr,
                 len: len as u32,
             }),
@@ -130,7 +131,6 @@ impl MemoryBlock {
     }
 }
 
-#[derive(Clone)]
 struct Bound {
     min: u64,
     max: u64,
