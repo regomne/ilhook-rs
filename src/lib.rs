@@ -3,8 +3,6 @@ This crate provides methods to inline hook binary codes of `x86` and `x64` instr
 
 HOOK is a mechanism that intercepts function calls and handles them by user-defined code.
 
-Ilhook supports hooking x86 codes currently, and x64 supporting will be soon.
-
 # Installation
 
 This crate works with Cargo and is on
@@ -65,7 +63,7 @@ Now let's start:
 use ilhook::x86::{Hooker, HookType, Registers, CallbackOption, HookFlags};
 
 # #[cfg(target_arch = "x86")]
-unsafe extern "C" fn on_check_sn(reg:*mut Registers, _:usize){
+unsafe extern "cdecl" fn on_check_sn(reg:*mut Registers, _:usize){
     println!("machine_hash: {}, sn_hash: {}", (*reg).ebx, (*reg).eax);
     (*reg).eax = (*reg).ebx; //we modify the sn_hash!
 }
@@ -98,7 +96,7 @@ Now let's hook:
 
 ```rust
 # #[cfg(target_arch = "x86_64")]
-# use ilhook::x64::{Hooker, HookType, Registers, CallbackOption, HookFlags};
+use ilhook::x64::{Hooker, HookType, Registers, CallbackOption, HookFlags};
 # #[cfg(target_arch = "x86_64")]
 # fn foo(x: u64) -> u64 {
 #     x * x
