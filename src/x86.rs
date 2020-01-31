@@ -504,8 +504,8 @@ fn generate_jmp_back_stub(
     });
 
     buf.write(&(cb as usize as u32).to_le_bytes())?;
-    // add esp, 0xc
-    buf.write(&[0x83, 0xc4, 0x0c])?;
+    // add esp, 0x8
+    buf.write(&[0x83, 0xc4, 0x08])?;
     // popfd
     // popad
     buf.write(&[0x9d, 0x61])?;
