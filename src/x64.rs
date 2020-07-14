@@ -384,7 +384,9 @@ fn move_instruction(addr: usize, inst: &[u8], arch_detail: &ArchDetail) -> Inst 
         0xeb | 0xe9 => Inst::new(&[0xe9, 0, 0, 0, 0], 1, get_jmp_dest_from_inst(&arch_detail)),
         // call
         0xe8 => Inst::new(&[0xe8, 0, 0, 0, 0], 1, get_jmp_dest_from_inst(&arch_detail)),
-        _ if x86.modrm() == 5 => copy_rip_relative_inst(addr, inst, &arch_detail),
+        _ if ((x86.modrm() & 7) == 5 && (x86.modrm() & 0xc0) == 0) => {
+            copy_rip_relative_inst(addr, inst, &arch_detail)
+        }
         _ => Inst::new(inst, 0, 0),
     }
 }
@@ -978,8 +980,8 @@ mod tests {
 
     #[test]
     fn test_move_inst_8() {
-        // mov rax, [rip + 0x00000001]
-        let inst = [0x48, 0x8b, 0x05, 0x01, 0x00, 0x00, 0x00];
+        // mov rbx, [rip + 0x00000001]
+        let inst = [0x48, 0x8b, 0x1d, 0x01, 0x00, 0x00, 0x00];
         let addr = inst.as_ptr() as usize;
         let new_inst = move_inst(&inst);
         assert_eq!(new_inst.bytes[..7], inst);
