@@ -23,12 +23,9 @@ impl Drop for FixedMemory {
 }
 
 impl FixedMemory {
-    pub fn allocate(hook_addr: u64, rel_tbl: &Vec<RelocEntry>) -> Result<Self, HookError> {
-        let bound = rel_tbl
-            .iter()
-            .fold(Bound::new(hook_addr), |b, ent| b.to_new(ent.dest_addr));
-        bound.check()?;
-        let block = MemoryLayout::read_self_mem_layout()?.find_memory_with_bound(&bound)?;
+    pub fn allocate(hook_addr: u64) -> Result<Self, HookError> {
+        let block =
+            MemoryLayout::read_self_mem_layout()?.find_memory_with_bound(&Bound::new(hook_addr))?;
         let len = block.end - block.begin;
         let mut addr = unsafe {
             mmap(
@@ -82,6 +79,7 @@ impl MemoryLayout {
     }
 
     fn find_memory_with_bound(&self, bnd: &Bound) -> Result<MemoryBlock, HookError> {
+        //@todo fix: find memory block from middle to edge
         let page_size = unsafe { sysconf(30) } as u64; //_SC_PAGESIZE == 30
         let blocks = &self.0;
         if blocks.len() == 0 {
@@ -146,7 +144,7 @@ impl Bound {
         }
     }
 
-    fn to_new(self, dest: u64) -> Self {
+    fn _to_new(self, dest: u64) -> Self {
         Self {
             min: cmp::max(
                 self.min,
@@ -160,7 +158,7 @@ impl Bound {
         }
     }
 
-    fn check(&self) -> Result<(), HookError> {
+    fn _check(&self) -> Result<(), HookError> {
         if self.min > self.max {
             Err(HookError::InvalidParameter)
         } else {

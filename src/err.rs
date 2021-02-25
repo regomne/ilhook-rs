@@ -24,6 +24,10 @@ pub enum HookError {
     #[error("disassemble error")]
     Disassemble,
 
+    /// Can't move code
+    #[error("moving code error")]
+    MoveCode,
+
     /// The pre-hook callback failed
     #[error("pre hook failed")]
     PreHook,

@@ -12,6 +12,7 @@ categories = ["hardware-support"]
 
 [dependencies]
 capstone = "0.6"
+iced-x86 = "1.10"
 thiserror = "1.0"
 bitflags = "1.2"
 

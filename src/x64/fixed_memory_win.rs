@@ -25,12 +25,8 @@ impl Drop for FixedMemory {
     }
 }
 impl FixedMemory {
-    pub fn allocate(hook_addr: u64, rel_tbl: &Vec<RelocEntry>) -> Result<Self, HookError> {
-        let bound = rel_tbl
-            .iter()
-            .fold(Bound::new(hook_addr), |b, ent| b.to_new(ent.dest_addr));
-        bound.check()?;
-        let addr = FixedMemory::allocate_internal(&bound)?;
+    pub fn allocate(hook_addr: u64) -> Result<Self, HookError> {
+        let addr = FixedMemory::allocate_internal(&Bound::new(hook_addr))?;
 
         Ok(Self { addr, len: 4096 })
     }
@@ -113,7 +109,7 @@ impl Bound {
         }
     }
 
-    fn to_new(self, dest: u64) -> Self {
+    fn _to_new(self, dest: u64) -> Self {
         Self {
             min: cmp::max(
                 self.min,
@@ -127,7 +123,7 @@ impl Bound {
         }
     }
 
-    fn check(&self) -> Result<(), HookError> {
+    fn _check(&self) -> Result<(), HookError> {
         if self.min > self.max {
             Err(HookError::InvalidParameter)
         } else {
