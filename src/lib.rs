@@ -102,7 +102,7 @@ use ilhook::x64::{Hooker, HookType, Registers, CallbackOption, HookFlags};
 #     x * x
 # }
 # #[cfg(target_arch = "x86_64")]
-unsafe extern "C" fn new_foo(reg:*mut Registers, _:usize, _:usize)->usize{
+unsafe extern "win64" fn new_foo(reg:*mut Registers, _:usize, _:usize)->usize{
     let x = (&*reg).rdi as usize;
     x*x+3
 }

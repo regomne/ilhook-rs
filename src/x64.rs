@@ -36,7 +36,7 @@ const JMP_INST_SIZE: usize = 5;
 ///
 /// * regs - The registers
 /// * src_addr - The address that has been hooked
-pub type JmpBackRoutine = unsafe extern "C" fn(regs: *mut Registers, src_addr: usize);
+pub type JmpBackRoutine = unsafe extern "win64" fn(regs: *mut Registers, src_addr: usize);
 
 /// The routine used in a `function hook`, which means the Routine will replace the
 /// original FUNCTION, and the EIP will `retn` directly instead of jumping back.
@@ -50,7 +50,7 @@ pub type JmpBackRoutine = unsafe extern "C" fn(regs: *mut Registers, src_addr: u
 ///
 /// Return the new return value of the replaced function.
 pub type RetnRoutine =
-    unsafe extern "C" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
+    unsafe extern "win64" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
 
 /// The routine used in a `jmp-addr hook`, which means the EIP will jump to the specified
 /// address after the Routine being run.
@@ -61,7 +61,7 @@ pub type RetnRoutine =
 /// * ori_func_ptr - Original function pointer. Call it after converted to the original function type.
 /// * src_addr - The address that has been hooked
 pub type JmpToAddrRoutine =
-    unsafe extern "C" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize);
+    unsafe extern "win64" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize);
 
 /// The routine used in a `jmp-ret hook`, which means the EIP will jump to the return
 /// value of the Routine.
@@ -74,7 +74,7 @@ pub type JmpToAddrRoutine =
 ///
 /// Return the address you want to jump to.
 pub type JmpToRetRoutine =
-    unsafe extern "C" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
+    unsafe extern "win64" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
 
 /// The hooking type.
 pub enum HookType {
@@ -829,7 +829,7 @@ mod tests {
         x * x
     }
     #[cfg(test)]
-    unsafe extern "C" fn on_foo(reg: *mut Registers, old_func: usize, _: usize) -> usize {
+    unsafe extern "win64" fn on_foo(reg: *mut Registers, old_func: usize, _: usize) -> usize {
         let old_func = std::mem::transmute::<usize, extern "sysv64" fn(u64) -> u64>(old_func);
         old_func((&*reg).rdi) as usize + 3
     }
