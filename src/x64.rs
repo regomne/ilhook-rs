@@ -36,7 +36,7 @@ const JMP_INST_SIZE: usize = 5;
 ///
 /// * regs - The registers
 /// * src_addr - The address that has been hooked
-pub type JmpBackRoutine = unsafe extern "sysv64" fn(regs: *mut Registers, src_addr: usize);
+pub type JmpBackRoutine = unsafe extern "C" fn(regs: *mut Registers, src_addr: usize);
 
 /// The routine used in a `function hook`, which means the Routine will replace the
 /// original FUNCTION, and the EIP will `retn` directly instead of jumping back.
@@ -50,7 +50,7 @@ pub type JmpBackRoutine = unsafe extern "sysv64" fn(regs: *mut Registers, src_ad
 ///
 /// Return the new return value of the replaced function.
 pub type RetnRoutine =
-    unsafe extern "sysv64" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
+    unsafe extern "C" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
 
 /// The routine used in a `jmp-addr hook`, which means the EIP will jump to the specified
 /// address after the Routine being run.
@@ -61,7 +61,7 @@ pub type RetnRoutine =
 /// * ori_func_ptr - Original function pointer. Call it after converted to the original function type.
 /// * src_addr - The address that has been hooked
 pub type JmpToAddrRoutine =
-    unsafe extern "sysv64" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize);
+    unsafe extern "C" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize);
 
 /// The routine used in a `jmp-ret hook`, which means the EIP will jump to the return
 /// value of the Routine.
@@ -74,7 +74,7 @@ pub type JmpToAddrRoutine =
 ///
 /// Return the address you want to jump to.
 pub type JmpToRetRoutine =
-    unsafe extern "sysv64" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
+    unsafe extern "C" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
 
 /// The hooking type.
 pub enum HookType {
@@ -467,13 +467,13 @@ fn generate_jmp_back_stub<T: Write + Seek>(
     cb: JmpBackRoutine,
     ori_len: u8,
 ) -> Result<(), HookError> {
-    // mov rsi, ori_addr
-    buf.write(&[0x48, 0xbe])?;
+    // mov rdx, ori_addr
+    buf.write(&[0x48, 0xba])?;
     buf.write(&(ori_addr as u64).to_le_bytes())?;
-    // mov rdi, rsp
+    // mov rcx, rsp
     // sub rsp, 0x10
     // mov rax, cb
-    buf.write(&[0x48, 0x89, 0xe7, 0x48, 0x83, 0xec, 0x10, 0x48, 0xb8])?;
+    buf.write(&[0x48, 0x89, 0xe1, 0x48, 0x83, 0xec, 0x10, 0x48, 0xb8])?;
     buf.write(&(cb as usize as u64).to_le_bytes())?;
     // call rax
     // add rsp, 0x10
@@ -496,16 +496,16 @@ fn generate_retn_stub<T: Write + Seek>(
     cb: RetnRoutine,
     ori_len: u8,
 ) -> Result<(), HookError> {
-    // mov rdx, ori_addr
-    buf.write(&[0x48, 0xba])?;
+    // mov r8, ori_addr
+    buf.write(&[0x49, 0xb8])?;
     buf.write(&(ori_addr as u64).to_le_bytes())?;
     let ori_func_addr_off = buf.seek(SeekFrom::Current(0)).unwrap() + 2;
-    // mov rsi, ori_func
-    // mov rdi, rsp
+    // mov rdx, ori_func
+    // mov rcx, rsp
     // sub rsp,0x20
     // mov rax, cb
     buf.write(&[
-        0x48, 0xbe, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0xe7, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
+        0x48, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0xe1, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
     ])?;
     buf.write(&(cb as usize as u64).to_le_bytes())?;
     // call rax
@@ -540,16 +540,16 @@ fn generate_jmp_addr_stub<T: Write + Seek>(
     cb: JmpToAddrRoutine,
     ori_len: u8,
 ) -> Result<(), HookError> {
-    // mov rdx, ori_addr
-    buf.write(&[0x48, 0xba])?;
+    // mov r8, ori_addr
+    buf.write(&[0x49, 0xb8])?;
     buf.write(&(ori_addr as u64).to_le_bytes())?;
     let ori_func_addr_off = buf.seek(SeekFrom::Current(0)).unwrap() + 2;
-    // mov rsi, ori_func
-    // mov rdi, rsp
+    // mov rdx, ori_func
+    // mov rcx, rsp
     // sub rsp,0x20
     // mov rax, cb
     buf.write(&[
-        0x48, 0xbe, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0xe7, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
+        0x48, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0xe1, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
     ])?;
     buf.write(&(cb as usize as u64).to_le_bytes())?;
     // call rax
@@ -579,16 +579,16 @@ fn generate_jmp_ret_stub<T: Write + Seek>(
     cb: JmpToRetRoutine,
     ori_len: u8,
 ) -> Result<(), HookError> {
-    // mov rdx, ori_addr
-    buf.write(&[0x48, 0xba])?;
+    // mov r8, ori_addr
+    buf.write(&[0x49, 0xb8])?;
     buf.write(&(ori_addr as u64).to_le_bytes())?;
     let ori_func_addr_off = buf.seek(SeekFrom::Current(0)).unwrap() + 2;
-    // mov rsi, ori_func
-    // mov rdi, rsp
+    // mov rdx, ori_func
+    // mov rcx, rsp
     // sub rsp,0x20
     // mov rax, cb
     buf.write(&[
-        0x48, 0xbe, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0xe7, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
+        0x48, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0xe1, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
     ])?;
     buf.write(&(cb as usize as u64).to_le_bytes())?;
     // call rax
@@ -829,7 +829,7 @@ mod tests {
         x * x
     }
     #[cfg(test)]
-    unsafe extern "sysv64" fn on_foo(reg: *mut Registers, old_func: usize, _: usize) -> usize {
+    unsafe extern "C" fn on_foo(reg: *mut Registers, old_func: usize, _: usize) -> usize {
         let old_func = std::mem::transmute::<usize, extern "sysv64" fn(u64) -> u64>(old_func);
         old_func((&*reg).rdi) as usize + 3
     }

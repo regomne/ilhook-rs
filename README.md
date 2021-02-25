@@ -16,7 +16,7 @@ like so:
 
 ```toml
 [dependencies]
-ilhook = "1.0"
+ilhook = "1.1"
 ```
 
 # Hook Types
@@ -66,7 +66,7 @@ Now let's start:
 ```rust
 use ilhook::x86::{Hooker, HookType, Registers, CallbackOption, HookFlags};
 
-unsafe extern "cdecl" fn on_check_sn(
+unsafe extern "C" fn on_check_sn(
     reg: *mut Registers,
     _: usize
 ) {
@@ -107,7 +107,7 @@ Now let's hook:
 ```rust
 use ilhook::x64::{Hooker, HookType, Registers, CallbackOption, HookFlags};
 
-unsafe extern "sysv64" fn new_foo(
+unsafe extern "C" fn new_foo(
     reg: *mut Registers,
     _ :usize,
     _ :usize
