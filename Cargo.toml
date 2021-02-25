@@ -11,7 +11,7 @@ keywords = ["hook", "assemble", "disassemble"]
 categories = ["hardware-support"]
 
 [dependencies]
-iced-x86 = "1.10"
+iced-x86 = { version = "1.10", default-features = false, features = ["std", "decoder", "block_encoder"] }
 thiserror = "1.0"
 bitflags = "1.2"
 

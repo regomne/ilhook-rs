@@ -24,8 +24,8 @@ impl Drop for FixedMemory {
 
 impl FixedMemory {
     pub fn allocate(hook_addr: u64) -> Result<Self, HookError> {
-        let block =
-            MemoryLayout::read_self_mem_layout()?.find_memory_with_bound(&Bound::new(hook_addr))?;
+        let bound = Bound::new(hook_addr);
+        let block = MemoryLayout::read_self_mem_layout()?.find_memory_with_bound(&bound)?;
         let len = block.end - block.begin;
         let mut addr = unsafe {
             mmap(
