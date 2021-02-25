@@ -1,9 +1,8 @@
 use bitflags::bitflags;
-use capstone::arch::x86::X86OperandType;
-use capstone::arch::ArchOperand;
-use capstone::prelude::*;
-use std::io::{Cursor, Write};
-use std::pin::Pin;
+use iced_x86::{
+    BlockEncoder, BlockEncoderOptions, Decoder, DecoderOptions, Instruction, InstructionBlock,
+};
+use std::io::{Cursor, Seek, SeekFrom, Write};
 use std::slice;
 
 #[cfg(windows)]
@@ -157,42 +156,12 @@ pub struct Hooker {
     flags: HookFlags,
 }
 
-#[derive(Default)]
-struct Inst {
-    bytes: [u8; MAX_INST_LEN],
-    len: u8,
-    reloc_off: u8,
-    reloc_addr: u32,
-}
-
-impl Inst {
-    fn new(bytes: &[u8], reloc_off: u8, reloc_addr: u32) -> Self {
-        let mut s = Self {
-            bytes: [0; MAX_INST_LEN],
-            len: bytes.len() as u8,
-            reloc_off,
-            reloc_addr,
-        };
-        if bytes.len() > MAX_INST_LEN {
-            panic!("bytes too long")
-        }
-        s.bytes[..bytes.len()].copy_from_slice(bytes);
-        s
-    }
-}
-
-#[derive(Default)]
-struct OriginalCode {
-    buf: [u8; MAX_INST_LEN + JMP_INST_SIZE],
-    len: u8,
-}
-
 /// The hook result returned by Hooker::hook.
 pub struct HookPoint {
     addr: usize,
-    stub: Pin<Box<[u8]>>,
+    stub: Box<[u8; 100]>,
     stub_prot: u32,
-    origin: OriginalCode,
+    origin: Vec<u8>,
     thread_cb: CallbackOption,
     flags: HookFlags,
 }
@@ -234,15 +203,15 @@ impl Hooker {
     ///
     /// Process may crash (instead of panic!) if:
     ///
-    /// 1. addr is not a accessible memory address.
-    /// 2. addr points to an incorrect position. (At the middle of an instruction, or where after it other instructions may jump)
+    /// 1. addr is not an accessible memory address, or is not long enough.
+    /// 2. addr points to an incorrect position. (At the middle of an instruction, or where after it other instructions may jump to)
     /// 3. Wrong Retn-val if hook_type is `HookType::Retn`. i.e. A `cdecl` function with non-zero retn-val, or a `stdcall` function with wrong retn-val.
     /// 4. Set `NOT_MODIFY_MEMORY_PROTECT` where it should not be set.
     /// 5. hook or unhook from 2 or more threads at the same time without `HookFlags::NOT_MODIFY_MEMORY_PROTECT`. Because of memory protection colliding.
     /// 6. Other unpredictable errors.
     pub unsafe fn hook(self) -> Result<HookPoint, HookError> {
-        let (moved, origin) = generate_moved_code(self.addr)?;
-        let stub = generate_stub(&self, moved, origin.len)?;
+        let (moving_insts, origin) = get_moving_insts(self.addr)?;
+        let stub = generate_stub(&self, moving_insts, origin.len() as u8)?;
         let stub_prot = modify_mem_protect(stub.as_ptr() as usize, stub.len())?;
         if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
             let old_prot = modify_mem_protect(self.addr, JMP_INST_SIZE)?;
@@ -288,6 +257,28 @@ impl Drop for HookPoint {
     fn drop(&mut self) {
         self.unhook_by_ref().unwrap_or_default();
     }
+}
+
+fn get_moving_insts(addr: usize) -> Result<(Vec<Instruction>, Vec<u8>), HookError> {
+    let code_slice =
+        unsafe { slice::from_raw_parts(addr as *const u8, MAX_INST_LEN * JMP_INST_SIZE) };
+    let mut decoder = Decoder::new(64, &code_slice, DecoderOptions::NONE);
+    decoder.set_ip(addr as u64);
+
+    let mut total_bytes = 0;
+    let mut ori_insts: Vec<Instruction> = vec![];
+    for inst in &mut decoder {
+        if inst.is_invalid() {
+            return Err(HookError::Disassemble);
+        }
+        ori_insts.push(inst);
+        total_bytes += inst.len();
+        if total_bytes >= JMP_INST_SIZE {
+            break;
+        }
+    }
+
+    Ok((ori_insts, code_slice[0..decoder.position()].into()))
 }
 
 #[cfg(windows)]
@@ -347,149 +338,40 @@ fn recover_mem_protect(addr: usize, _: usize, old: u32) {
     };
 }
 
-#[derive(PartialEq, Debug)]
-struct RelocEntry {
-    off: u8,
-    reloc_base_off: u8,
-    dest_addr: u32,
-}
-
-fn get_jmp_dest_from_inst(detail: &ArchDetail) -> u32 {
-    let ops = detail.operands();
-    assert_eq!(ops.len(), 1);
-    if let ArchOperand::X86Operand(op) = &ops[0] {
-        if let X86OperandType::Imm(v) = op.op_type {
-            v as u32
-        } else {
-            panic!("not jmp?")
-        }
-    } else {
-        panic!("not jmp?")
-    }
-}
-
-fn move_instruction(inst: &[u8], arch_detail: &ArchDetail) -> Inst {
-    let x86 = arch_detail.x86().unwrap();
-    let op1 = x86.opcode()[0];
-    let op2 = x86.opcode()[1];
-    match op1 {
-        // short jXX
-        x if (x & 0xf0) == 0x70 => Inst::new(
-            &[0x0f, 0x80 | (x & 0xf), 0, 0, 0, 0],
-            2,
-            get_jmp_dest_from_inst(&arch_detail),
-        ),
-        // long jXX
-        0x0f if (op2 & 0xf0) == 0x80 => Inst::new(
-            &[0x0f, op2, 0, 0, 0, 0],
-            2,
-            get_jmp_dest_from_inst(&arch_detail),
-        ),
-        // loop/jecxz
-        x @ 0xe0..=0xe3 => Inst::new(
-            &[x, 0x02, 0xeb, 0x05, 0xe9, 0, 0, 0, 0],
-            5,
-            get_jmp_dest_from_inst(&arch_detail),
-        ),
-        // short and long jmp
-        0xeb | 0xe9 => Inst::new(&[0xe9, 0, 0, 0, 0], 1, get_jmp_dest_from_inst(&arch_detail)),
-        // call
-        0xe8 => Inst::new(&[0xe8, 0, 0, 0, 0], 1, get_jmp_dest_from_inst(&arch_detail)),
-        _ => Inst::new(inst, 0, 0),
-    }
-}
-
-fn generate_moved_code(addr: usize) -> Result<(Vec<Inst>, OriginalCode), HookError> {
-    let cs = Capstone::new()
-        .x86()
-        .mode(arch::x86::ArchMode::Mode32)
-        .syntax(arch::x86::ArchSyntax::Intel)
-        .detail(true)
-        .build()
-        .expect("Failed to create Capstone object");
-
-    let mut ret: Vec<Inst> = vec![];
-    let code_slice =
-        unsafe { slice::from_raw_parts(addr as *const u8, MAX_INST_LEN * JMP_INST_SIZE) };
-    let mut code_idx = 0;
-    while code_idx < JMP_INST_SIZE {
-        let insts = match cs.disasm_count(&code_slice[code_idx..], (addr + code_idx) as u64, 1) {
-            Ok(i) => i,
-            Err(_) => return Err(HookError::Disassemble),
-        };
-        let inst = insts.iter().nth(0).unwrap();
-        let detail = cs.insn_detail(&inst).unwrap();
-        ret.push(move_instruction(inst.bytes(), &detail.arch_detail()));
-        code_idx += inst.bytes().len();
-    }
-    let mut origin: OriginalCode = Default::default();
-    origin.len = code_idx as u8;
-    origin.buf[..code_idx].copy_from_slice(&code_slice[..code_idx]);
-    Ok((ret, origin))
-}
-
-fn write_moved_code_to_buf(
-    code: &Vec<Inst>,
-    buf: &mut Cursor<Vec<u8>>,
-    reloc_tbl: &mut Vec<RelocEntry>,
-) {
-    code.iter().for_each(|inst| {
-        if inst.reloc_off != 0 {
-            reloc_tbl.push(RelocEntry {
-                off: buf.position() as u8 + inst.reloc_off,
-                reloc_base_off: 4,
-                dest_addr: inst.reloc_addr,
-            });
-        }
-        buf.write(&inst.bytes[..inst.len as usize]).unwrap();
-    });
-}
-
-fn jmp_addr(
-    addr: u32,
-    buf: &mut Cursor<Vec<u8>>,
-    rel_tbl: &mut Vec<RelocEntry>,
+fn write_relative_off<T: Write + Seek>(
+    buf: &mut T,
+    base_addr: u32,
+    dst_addr: u32,
 ) -> Result<(), HookError> {
-    buf.write(&[0xe9])?;
-    rel_tbl.push(RelocEntry {
-        off: buf.position() as u8,
-        reloc_base_off: 4,
-        dest_addr: addr,
-    });
-    buf.write(&[0, 0, 0, 0])?;
+    let dst_addr = dst_addr as i32;
+    let cur_pos = buf.seek(SeekFrom::Current(0)).unwrap() as i32;
+    let call_off = dst_addr - (base_addr as i32 + cur_pos + 4);
+    buf.write(&call_off.to_le_bytes())?;
     Ok(())
 }
 
-fn relocate_addr(
-    buf: Pin<&mut [u8]>,
-    rel_tbl: Vec<RelocEntry>,
-    addr_to_write: u8,
-    moved_code_off: u8,
-) {
-    let buf = unsafe { Pin::get_unchecked_mut(buf) };
-    let buf_addr = buf.as_ptr() as usize as u32;
-    rel_tbl.iter().for_each(|ent| {
-        let off = ent.off as usize;
-        let relative_addr =
-            ent.dest_addr as i32 - (buf_addr as i32 + off as i32 + ent.reloc_base_off as i32);
-        buf[off..off + 4].copy_from_slice(&relative_addr.to_le_bytes());
-    });
-
-    if addr_to_write != 0 {
-        let addr_to_write = addr_to_write as usize;
-        buf[addr_to_write..addr_to_write + 4]
-            .copy_from_slice(&(buf_addr + moved_code_off as u32).to_le_bytes());
-    }
+fn move_code_to_addr(ori_insts: &Vec<Instruction>, dest_addr: u32) -> Result<Vec<u8>, HookError> {
+    let block = InstructionBlock::new(&ori_insts, dest_addr as u64);
+    let encoded = BlockEncoder::encode(64, block, BlockEncoderOptions::NONE)
+        .map_err(|_| HookError::MoveCode)?;
+    Ok(encoded.code_buffer)
 }
 
-fn generate_jmp_back_stub(
-    buf: &mut Cursor<Vec<u8>>,
-    rel_tbl: &mut Vec<RelocEntry>,
-    moved_code: Vec<Inst>,
-    ori_addr: usize,
+fn write_ori_func_addr<T: Write + Seek>(buf: &mut T, ori_func_addr_off: u32, ori_func_off: u32) {
+    let pos = buf.seek(SeekFrom::Current(0)).unwrap();
+    buf.seek(SeekFrom::Start(ori_func_addr_off as u64)).unwrap();
+    buf.write(&ori_func_off.to_le_bytes()).unwrap();
+    buf.seek(SeekFrom::Start(pos)).unwrap();
+}
+
+fn generate_jmp_back_stub<T: Write + Seek>(
+    buf: &mut T,
+    stub_base_addr: u32,
+    moving_code: &Vec<Instruction>,
+    ori_addr: u32,
     cb: JmpBackRoutine,
     ori_len: u8,
-) -> Result<(u8, u8), HookError> {
+) -> Result<(), HookError> {
     // push hooker.addr
     buf.write(&[0x68])?;
     buf.write(&(ori_addr as u32).to_le_bytes())?;
@@ -497,33 +379,30 @@ fn generate_jmp_back_stub(
     // push ebp (Registers)
     // call XXXX (dest addr)
     buf.write(&[0x55, 0xe8])?;
-    rel_tbl.push(RelocEntry {
-        off: buf.position() as u8,
-        dest_addr: cb as usize as u32,
-        reloc_base_off: 4,
-    });
+    write_relative_off(buf, stub_base_addr, cb as u32)?;
 
-    buf.write(&(cb as usize as u32).to_le_bytes())?;
     // add esp, 0x8
     buf.write(&[0x83, 0xc4, 0x08])?;
     // popfd
     // popad
     buf.write(&[0x9d, 0x61])?;
-    write_moved_code_to_buf(&moved_code, buf, rel_tbl);
+
+    let cur_pos = buf.seek(SeekFrom::Current(0)).unwrap() as u32;
+    buf.write(&move_code_to_addr(moving_code, stub_base_addr + cur_pos)?)?;
     // jmp back
-    jmp_addr(ori_addr as u32 + ori_len as u32, buf, rel_tbl)?;
-    Ok((0, 0))
+    buf.write(&[0xe9])?;
+    write_relative_off(buf, stub_base_addr, ori_addr as u32 + ori_len as u32)
 }
 
-fn generate_retn_stub(
-    buf: &mut Cursor<Vec<u8>>,
-    rel_tbl: &mut Vec<RelocEntry>,
-    moved_code: Vec<Inst>,
-    ori_addr: usize,
+fn generate_retn_stub<T: Write + Seek>(
+    buf: &mut T,
+    stub_base_addr: u32,
+    moving_code: &Vec<Instruction>,
+    ori_addr: u32,
     retn_val: u16,
     cb: RetnRoutine,
     ori_len: u8,
-) -> Result<(u8, u8), HookError> {
+) -> Result<(), HookError> {
     // push hooker.addr
     buf.write(&[0x68])?;
     buf.write(&(ori_addr as u32).to_le_bytes())?;
@@ -531,15 +410,10 @@ fn generate_retn_stub(
     // push XXXX (original function addr)
     // push ebp (Registers)
     // call XXXX (dest addr)
-    let ori_func_addr_off = buf.position() as u8 + 1;
+    let ori_func_addr_off = buf.seek(SeekFrom::Current(0)).unwrap() + 1;
     buf.write(&[0x68, 0, 0, 0, 0, 0x55, 0xe8])?;
-    rel_tbl.push(RelocEntry {
-        off: buf.position() as u8,
-        reloc_base_off: 4,
-        dest_addr: cb as usize as u32,
-    });
+    write_relative_off(buf, stub_base_addr, cb as u32)?;
 
-    buf.write(&[0, 0, 0, 0])?;
     // add esp, 0xc
     buf.write(&[0x83, 0xc4, 0x0c])?;
     // mov [esp+20h], eax
@@ -555,22 +429,26 @@ fn generate_retn_stub(
         buf.write(&[0xc2])?;
         buf.write(&retn_val.to_le_bytes())?;
     }
-    let ori_func_off = buf.position() as u8;
-    write_moved_code_to_buf(&moved_code, buf, rel_tbl);
+    let ori_func_off = buf.seek(SeekFrom::Current(0)).unwrap() as u32;
+    write_ori_func_addr(buf, ori_func_addr_off as u32, stub_base_addr + ori_func_off);
+
+    let cur_pos = buf.seek(SeekFrom::Current(0)).unwrap() as u32;
+    buf.write(&move_code_to_addr(moving_code, stub_base_addr + cur_pos)?)?;
+
     // jmp ori_addr
-    jmp_addr(ori_addr as u32 + ori_len as u32, buf, rel_tbl)?;
-    Ok((ori_func_addr_off, ori_func_off))
+    buf.write(&[0xe9])?;
+    write_relative_off(buf, stub_base_addr, ori_addr as u32 + ori_len as u32)
 }
 
-fn generate_jmp_addr_stub(
-    buf: &mut Cursor<Vec<u8>>,
-    rel_tbl: &mut Vec<RelocEntry>,
-    moved_code: Vec<Inst>,
-    ori_addr: usize,
-    dest_addr: usize,
+fn generate_jmp_addr_stub<T: Write + Seek>(
+    buf: &mut T,
+    stub_base_addr: u32,
+    moving_code: &Vec<Instruction>,
+    ori_addr: u32,
+    dest_addr: u32,
     cb: JmpToAddrRoutine,
     ori_len: u8,
-) -> Result<(u8, u8), HookError> {
+) -> Result<(), HookError> {
     // push hooker.addr
     buf.write(&[0x68])?;
     buf.write(&(ori_addr as u32).to_le_bytes())?;
@@ -578,38 +456,38 @@ fn generate_jmp_addr_stub(
     // push XXXX (original function addr)
     // push ebp (Registers)
     // call XXXX (dest addr)
-    let ori_func_addr_off = buf.position() as u8 + 1;
+    let ori_func_addr_off = buf.seek(SeekFrom::Current(0)).unwrap() + 1;
     buf.write(&[0x68, 0, 0, 0, 0, 0x55, 0xe8])?;
-    rel_tbl.push(RelocEntry {
-        off: buf.position() as u8,
-        dest_addr: cb as usize as u32,
-        reloc_base_off: 4,
-    });
+    write_relative_off(buf, stub_base_addr, cb as u32)?;
 
-    buf.write(&[0, 0, 0, 0])?;
     // add esp, 0xc
     buf.write(&[0x83, 0xc4, 0x0c])?;
     // popfd
     // popad
     buf.write(&[0x9d, 0x61])?;
     // jmp back
-    jmp_addr(dest_addr as u32 + ori_len as u32, buf, rel_tbl)?;
+    buf.write(&[0xe9])?;
+    write_relative_off(buf, stub_base_addr, dest_addr as u32 + ori_len as u32)?;
 
-    let ori_func_off = buf.position() as u8;
-    write_moved_code_to_buf(&moved_code, buf, rel_tbl);
+    let ori_func_off = buf.seek(SeekFrom::Current(0)).unwrap() as u32;
+    write_ori_func_addr(buf, ori_func_addr_off as u32, stub_base_addr + ori_func_off);
+
+    let cur_pos = buf.seek(SeekFrom::Current(0)).unwrap() as u32;
+    buf.write(&move_code_to_addr(moving_code, stub_base_addr + cur_pos)?)?;
+
     // jmp ori_addr
-    jmp_addr(ori_addr as u32 + ori_len as u32, buf, rel_tbl)?;
-    Ok((ori_func_addr_off, ori_func_off))
+    buf.write(&[0xe9])?;
+    write_relative_off(buf, stub_base_addr, ori_addr as u32 + ori_len as u32)
 }
 
-fn generate_jmp_ret_stub(
-    buf: &mut Cursor<Vec<u8>>,
-    rel_tbl: &mut Vec<RelocEntry>,
-    moved_code: Vec<Inst>,
-    ori_addr: usize,
+fn generate_jmp_ret_stub<T: Write + Seek>(
+    buf: &mut T,
+    stub_base_addr: u32,
+    moving_code: &Vec<Instruction>,
+    ori_addr: u32,
     cb: JmpToRetRoutine,
     ori_len: u8,
-) -> Result<(u8, u8), HookError> {
+) -> Result<(), HookError> {
     // push hooker.addr
     buf.write(&[0x68])?;
     buf.write(&(ori_addr as u32).to_le_bytes())?;
@@ -617,15 +495,10 @@ fn generate_jmp_ret_stub(
     // push XXXX (original function addr)
     // push ebp (Registers)
     // call XXXX (dest addr)
-    let ori_func_addr_off = buf.position() as u8 + 1;
+    let ori_func_addr_off = buf.seek(SeekFrom::Current(0)).unwrap() + 1;
     buf.write(&[0x68, 0, 0, 0, 0, 0x55, 0xe8])?;
-    rel_tbl.push(RelocEntry {
-        off: buf.position() as u8,
-        reloc_base_off: 4,
-        dest_addr: cb as usize as u32,
-    });
+    write_relative_off(buf, stub_base_addr, cb as u32)?;
 
-    buf.write(&[0, 0, 0, 0])?;
     // add esp, 0xc
     buf.write(&[0x83, 0xc4, 0x0c])?;
     // mov [esp-4], eax
@@ -636,55 +509,69 @@ fn generate_jmp_ret_stub(
     // jmp dword ptr [esp-0x28]
     buf.write(&[0xff, 0x64, 0x24, 0xd8])?;
 
-    let ori_func_off = buf.position() as u8;
-    write_moved_code_to_buf(&moved_code, buf, rel_tbl);
-    // jmp dest_addr
-    jmp_addr(ori_addr as u32 + ori_len as u32, buf, rel_tbl)?;
-    Ok((ori_func_addr_off, ori_func_off))
+    let ori_func_off = buf.seek(SeekFrom::Current(0)).unwrap() as u32;
+    write_ori_func_addr(buf, ori_func_addr_off as u32, stub_base_addr + ori_func_off);
+
+    let cur_pos = buf.seek(SeekFrom::Current(0)).unwrap() as u32;
+    buf.write(&move_code_to_addr(moving_code, stub_base_addr + cur_pos)?)?;
+
+    // jmp ori_addr
+    buf.write(&[0xe9])?;
+    write_relative_off(buf, stub_base_addr, ori_addr as u32 + ori_len as u32)
 }
 
 fn generate_stub(
     hooker: &Hooker,
-    moved_code: Vec<Inst>,
+    moving_code: Vec<Instruction>,
     ori_len: u8,
-) -> Result<Pin<Box<[u8]>>, HookError> {
-    let mut rel_tbl = Vec::<RelocEntry>::new();
-    let mut buf = Cursor::new(Vec::<u8>::with_capacity(100));
+) -> Result<Box<[u8; 100]>, HookError> {
+    let mut raw_buffer = Box::new([0u8; 100]);
+    let stub_addr = raw_buffer.as_ptr() as u32;
+    let mut buf = Cursor::new(&mut raw_buffer[..]);
+
     // pushad
     // pushfd
     // mov ebp, esp
     buf.write(&[0x60, 0x9c, 0x8b, 0xec])?;
 
-    let (ori_func_addr_off, ori_func_off) = match hooker.hook_type {
-        HookType::JmpBack(cb) => {
-            generate_jmp_back_stub(&mut buf, &mut rel_tbl, moved_code, hooker.addr, cb, ori_len)
-        }
+    match hooker.hook_type {
+        HookType::JmpBack(cb) => generate_jmp_back_stub(
+            &mut buf,
+            stub_addr,
+            &moving_code,
+            hooker.addr as u32,
+            cb,
+            ori_len,
+        ),
         HookType::Retn(val, cb) => generate_retn_stub(
             &mut buf,
-            &mut rel_tbl,
-            moved_code,
-            hooker.addr,
+            stub_addr,
+            &moving_code,
+            hooker.addr as u32,
             val as u16,
             cb,
             ori_len,
         ),
         HookType::JmpToAddr(dest, cb) => generate_jmp_addr_stub(
             &mut buf,
-            &mut rel_tbl,
-            moved_code,
-            hooker.addr,
-            dest,
+            stub_addr,
+            &moving_code,
+            hooker.addr as u32,
+            dest as u32,
             cb,
             ori_len,
         ),
-        HookType::JmpToRet(cb) => {
-            generate_jmp_ret_stub(&mut buf, &mut rel_tbl, moved_code, hooker.addr, cb, ori_len)
-        }
+        HookType::JmpToRet(cb) => generate_jmp_ret_stub(
+            &mut buf,
+            stub_addr,
+            &moving_code,
+            hooker.addr as u32,
+            cb,
+            ori_len,
+        ),
     }?;
 
-    let mut p = Pin::new(buf.into_inner().into_boxed_slice());
-    relocate_addr(p.as_mut(), rel_tbl, ori_func_addr_off, ori_func_off);
-    Ok(p)
+    Ok(raw_buffer)
 }
 
 fn modify_jmp(dest_addr: usize, stub_addr: usize) -> Result<(), HookError> {
@@ -720,10 +607,10 @@ fn recover_jmp_with_thread_cb(hook: &HookPoint) -> Result<(), HookError> {
         if !cbs.pre() {
             return Err(HookError::PreHook);
         }
-        recover_jmp(hook.addr, &hook.origin.buf[..hook.origin.len as usize]);
+        recover_jmp(hook.addr, &hook.origin);
         cbs.post();
     } else {
-        recover_jmp(hook.addr, &hook.origin.buf[..hook.origin.len as usize]);
+        recover_jmp(hook.addr, &hook.origin);
     }
     Ok(())
 }
@@ -732,237 +619,6 @@ fn recover_jmp_with_thread_cb(hook: &HookPoint) -> Result<(), HookError> {
 mod tests {
     #[allow(unused_imports)]
     use super::*;
-
-    #[test]
-    fn test_move_inst_1() {
-        let cs = Capstone::new()
-            .x86()
-            .mode(arch::x86::ArchMode::Mode64)
-            .syntax(arch::x86::ArchSyntax::Intel)
-            .detail(true)
-            .build()
-            .expect("Failed to create Capstone object");
-
-        // jmp eax
-        let inst = [0xff, 0xe0];
-        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
-        let inst_info = insts.iter().nth(0).unwrap();
-        let insn_detail = cs.insn_detail(&inst_info).unwrap();
-        let arch_detail = insn_detail.arch_detail();
-        let new_inst = move_instruction(&inst, &arch_detail);
-        assert_eq!(new_inst.bytes[..2], inst);
-        assert_eq!(new_inst.len, 2);
-        assert_eq!(new_inst.reloc_off, 0);
-    }
-    #[test]
-    fn test_move_inst_2() {
-        let cs = Capstone::new()
-            .x86()
-            .mode(arch::x86::ArchMode::Mode64)
-            .syntax(arch::x86::ArchSyntax::Intel)
-            .detail(true)
-            .build()
-            .expect("Failed to create Capstone object");
-        // jmp @-2
-        let inst = [0xeb, 0xfe];
-        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
-        let inst_info = insts.iter().nth(0).unwrap();
-        let insn_detail = cs.insn_detail(&inst_info).unwrap();
-        let arch_detail = insn_detail.arch_detail();
-        let new_inst = move_instruction(&inst, &arch_detail);
-        let addr = inst.as_ptr() as usize as i32;
-        assert_eq!(new_inst.bytes[0], 0xe9);
-        assert_eq!(new_inst.reloc_addr, (addr + 2 - 2) as u32);
-        assert_eq!(new_inst.len, 5);
-        assert_eq!(new_inst.reloc_off, 1);
-    }
-    #[test]
-    fn test_move_inst_3() {
-        let cs = Capstone::new()
-            .x86()
-            .mode(arch::x86::ArchMode::Mode64)
-            .syntax(arch::x86::ArchSyntax::Intel)
-            .detail(true)
-            .build()
-            .expect("Failed to create Capstone object");
-        // jmp @-0x20
-        let inst = [0xe9, 0xe0, 0xff, 0xff, 0xff];
-        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
-        let inst_info = insts.iter().nth(0).unwrap();
-        let insn_detail = cs.insn_detail(&inst_info).unwrap();
-        let arch_detail = insn_detail.arch_detail();
-        let new_inst = move_instruction(&inst, &arch_detail);
-        let addr = inst.as_ptr() as usize as i32;
-        assert_eq!(new_inst.bytes[0], 0xe9);
-        assert_eq!(new_inst.reloc_addr, (addr + 5 - 0x20) as u32);
-        assert_eq!(new_inst.len, 5);
-        assert_eq!(new_inst.reloc_off, 1);
-    }
-    #[test]
-    fn test_move_inst_4() {
-        let cs = Capstone::new()
-            .x86()
-            .mode(arch::x86::ArchMode::Mode64)
-            .syntax(arch::x86::ArchSyntax::Intel)
-            .detail(true)
-            .build()
-            .expect("Failed to create Capstone object");
-        // call @+10
-        let inst = [0xe8, 0xa, 0, 0, 0];
-        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
-        let inst_info = insts.iter().nth(0).unwrap();
-        let insn_detail = cs.insn_detail(&inst_info).unwrap();
-        let arch_detail = insn_detail.arch_detail();
-        let new_inst = move_instruction(&inst, &arch_detail);
-        let addr = inst.as_ptr() as usize as i32;
-        assert_eq!(new_inst.bytes[0], 0xe8);
-        assert_eq!(new_inst.reloc_addr, (addr + 5 + 10) as u32);
-        assert_eq!(new_inst.len, 5);
-        assert_eq!(new_inst.reloc_off, 1);
-    }
-    #[test]
-    fn test_move_inst_5() {
-        let cs = Capstone::new()
-            .x86()
-            .mode(arch::x86::ArchMode::Mode64)
-            .syntax(arch::x86::ArchSyntax::Intel)
-            .detail(true)
-            .build()
-            .expect("Failed to create Capstone object");
-        // jnz @+0
-        let inst = [0x75, 0];
-        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
-        let inst_info = insts.iter().nth(0).unwrap();
-        let insn_detail = cs.insn_detail(&inst_info).unwrap();
-        let arch_detail = insn_detail.arch_detail();
-        let new_inst = move_instruction(&inst, &arch_detail);
-        let addr = inst.as_ptr() as usize as i32;
-        assert_eq!(new_inst.bytes[0..2], [0x0f, 0x85]);
-        assert_eq!(new_inst.reloc_addr, (addr + 2) as u32);
-        assert_eq!(new_inst.len, 6);
-        assert_eq!(new_inst.reloc_off, 2);
-    }
-    #[test]
-    fn test_move_inst_6() {
-        let cs = Capstone::new()
-            .x86()
-            .mode(arch::x86::ArchMode::Mode64)
-            .syntax(arch::x86::ArchSyntax::Intel)
-            .detail(true)
-            .build()
-            .expect("Failed to create Capstone object");
-        // jnz @-6
-        let inst = [0x0f, 0x85, 0xfa, 0xff, 0xff, 0xff];
-        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
-        let inst_info = insts.iter().nth(0).unwrap();
-        let insn_detail = cs.insn_detail(&inst_info).unwrap();
-        let arch_detail = insn_detail.arch_detail();
-        let new_inst = move_instruction(&inst, &arch_detail);
-        let addr = inst.as_ptr() as usize as i32;
-        assert_eq!(new_inst.bytes[0..2], [0x0f, 0x85]);
-        assert_eq!(new_inst.reloc_addr, addr as u32);
-        assert_eq!(new_inst.len, 6);
-        assert_eq!(new_inst.reloc_off, 2);
-    }
-    #[test]
-    fn test_move_inst_7() {
-        let cs = Capstone::new()
-            .x86()
-            .mode(arch::x86::ArchMode::Mode64)
-            .syntax(arch::x86::ArchSyntax::Intel)
-            .detail(true)
-            .build()
-            .expect("Failed to create Capstone object");
-        // jecxz @+10
-        let inst = [0xe3, 0x02];
-        let insts = cs.disasm_count(&inst, inst.as_ptr() as u64, 1).unwrap();
-        let inst_info = insts.iter().nth(0).unwrap();
-        let insn_detail = cs.insn_detail(&inst_info).unwrap();
-        let arch_detail = insn_detail.arch_detail();
-        let new_inst = move_instruction(&inst, &arch_detail);
-        let addr = inst.as_ptr() as usize as i32;
-        //assert_eq!(new_inst.bytes[0..5], [0xe3, 0x02, 0xeb, 0x05, 0xe9]);
-        assert_eq!(new_inst.reloc_addr, (addr + 4) as u32);
-        assert_eq!(new_inst.len, 9);
-        assert_eq!(new_inst.reloc_off, 5);
-    }
-    #[test]
-    fn test_relocate_addr() {
-        let b: Box<[u8]> =
-            vec![3, 0, 0, 0, 0, 0xf7, 0xff, 0xff, 0xff, 2, 0, 0, 0].into_boxed_slice();
-        let mut p = Pin::new(b);
-        let addr = p.as_ptr() as usize as i32;
-        let off1 = [0, 0, 0, 0];
-        let off2 = (addr + 9 - 9).to_le_bytes();
-        let off3 = (addr + 13 + 2).to_le_bytes();
-        let x: Vec<u8> = [3]
-            .iter()
-            .chain(off1.iter())
-            .chain(off2.iter())
-            .chain(off3.iter())
-            .cloned()
-            .collect();
-        p.copy_from_slice(&x[..]);
-        let rel_tbl: Vec<RelocEntry> = vec![
-            RelocEntry {
-                off: 5,
-                reloc_base_off: 4,
-                dest_addr: addr as u32,
-            },
-            RelocEntry {
-                off: 9,
-                reloc_base_off: 4,
-                dest_addr: (addr + 13 + 2) as u32,
-            },
-        ];
-        relocate_addr(p.as_mut(), rel_tbl, 1, 9);
-        let off1 = (addr + 9).to_le_bytes();
-        let off2 = [0xf7, 0xff, 0xff, 0xff];
-        let off3 = [2, 0, 0, 0];
-        let b: Vec<&u8> = [3]
-            .iter()
-            .chain(off1.iter())
-            .chain(off2.iter())
-            .chain(off3.iter())
-            .collect();
-        assert_eq!(p.iter().cmp(b.iter().cloned()), std::cmp::Ordering::Equal);
-    }
-    #[test]
-    fn test_generate_code() {
-        let b: Box<[u8]> = vec![0x53, 0x83, 0xec, 0x18, 0xe8, 0, 0, 0, 0, 0x58].into_boxed_slice();
-        let p = Pin::new(b);
-        let addr = p.as_ptr() as usize;
-        let (moved_code, origin) = generate_moved_code(addr).unwrap();
-        assert_eq!(moved_code.len(), 3);
-        assert_eq!(moved_code[0].len, 1);
-        assert_eq!(moved_code[1].len, 3);
-        assert_eq!(moved_code[2].len, 5);
-        assert_eq!(moved_code[2].bytes[0], 0xe8);
-        //assert_eq!(moved_code[2].bytes[1..5], (addr as u32 + 9).to_le_bytes());
-        assert_eq!(moved_code[2].reloc_addr, addr as u32 + 9);
-        assert_eq!(moved_code[2].reloc_off, 1);
-        assert_eq!(origin.len, 9);
-        assert_eq!(origin.buf[..9], [0x53, 0x83, 0xec, 0x18, 0xe8, 0, 0, 0, 0]);
-    }
-    #[test]
-    fn test_write_moved_code() {
-        let b: Box<[u8]> = vec![0x53, 0x83, 0xec, 0x18, 0xe8, 0, 0, 0, 0, 0x58].into_boxed_slice();
-        let p = Pin::new(b);
-        let addr = p.as_ptr() as usize;
-        let (moved_code, _) = generate_moved_code(addr).unwrap();
-        let mut rel_tbl = Vec::<RelocEntry>::new();
-        let mut buf = Cursor::new(Vec::<u8>::with_capacity(100));
-        write_moved_code_to_buf(&moved_code, &mut buf, &mut rel_tbl);
-        assert_eq!(buf.into_inner(), [0x53, 0x83, 0xec, 0x18, 0xe8, 0, 0, 0, 0]);
-        assert_eq!(
-            rel_tbl,
-            [RelocEntry {
-                off: 5,
-                reloc_base_off: 4,
-                dest_addr: (addr + 9) as u32
-            }]
-        );
-    }
 
     #[cfg(test)]
     fn foo(x: u32) -> u32 {
