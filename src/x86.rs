@@ -262,7 +262,7 @@ impl Drop for HookPoint {
 fn get_moving_insts(addr: usize) -> Result<(Vec<Instruction>, Vec<u8>), HookError> {
     let code_slice =
         unsafe { slice::from_raw_parts(addr as *const u8, MAX_INST_LEN * JMP_INST_SIZE) };
-    let mut decoder = Decoder::new(64, &code_slice, DecoderOptions::NONE);
+    let mut decoder = Decoder::new(32, &code_slice, DecoderOptions::NONE);
     decoder.set_ip(addr as u64);
 
     let mut total_bytes = 0;
@@ -352,7 +352,7 @@ fn write_relative_off<T: Write + Seek>(
 
 fn move_code_to_addr(ori_insts: &Vec<Instruction>, dest_addr: u32) -> Result<Vec<u8>, HookError> {
     let block = InstructionBlock::new(&ori_insts, dest_addr as u64);
-    let encoded = BlockEncoder::encode(64, block, BlockEncoderOptions::NONE)
+    let encoded = BlockEncoder::encode(32, block, BlockEncoderOptions::NONE)
         .map_err(|_| HookError::MoveCode)?;
     Ok(encoded.code_buffer)
 }
