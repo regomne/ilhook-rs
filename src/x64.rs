@@ -118,6 +118,8 @@ pub struct Registers {
     pub xmm2: u128,
     /// The xmm3 register
     pub xmm3: u128,
+    /// The flags register
+    pub rflags: u64,
     /// The r15 register
     pub r15: u64,
     /// The r14 register
@@ -136,8 +138,6 @@ pub struct Registers {
     pub r8: u64,
     /// The rbp register
     pub rbp: u64,
-    /// The rsp register
-    pub rsp: u64,
     /// The rdi register
     pub rdi: u64,
     /// The rsi register
@@ -146,12 +146,12 @@ pub struct Registers {
     pub rdx: u64,
     /// The rcx register
     pub rcx: u64,
-    /// The rbx register
-    pub rbx: u64,
-    /// The flags register
-    pub rflags: u64,
     /// The rax register
     pub rax: u64,
+    /// The rbx register
+    pub rbx: u64,
+    /// The rsp register
+    pub rsp: u64,
 }
 
 impl Registers {
@@ -165,7 +165,7 @@ impl Registers {
     ///
     /// Process may crash if register `rsp` does not point to a valid stack.
     pub unsafe fn get_stack(&self, cnt: usize) -> u64 {
-        *((self.rsp as usize + cnt * 8) as usize as *mut u64)
+        *((self.rsp as usize + cnt * 8) as *const u64)
     }
 }
 
@@ -325,26 +325,13 @@ fn get_moving_insts(addr: usize) -> Result<(Vec<Instruction>, Vec<u8>), HookErro
 }
 
 fn write_stub_prolog(buf: &mut impl Write) -> Result<usize, std::io::Error> {
-    // pushfq
-    // test rsp,8
-    // je _branch1
-    // push rax
-    // mov rax,qword ptr ss:[rsp+8]
-    // mov dword ptr ss:[rsp+8],0
-    // jmp _branch2
-    // _branch1:
-    // sub rsp,8
-    // push rax
-    // mov rax,qword ptr ss:[rsp+10]
-    // mov dword ptr ss:[rsp+8],1
-    // _branch2:
-    // push rax
+    // push rsp
     // push rbx
+    // push rax
     // push rcx
     // push rdx
     // push rsi
     // push rdi
-    // push rsp
     // push rbp
     // push r8
     // push r9
@@ -354,28 +341,39 @@ fn write_stub_prolog(buf: &mut impl Write) -> Result<usize, std::io::Error> {
     // push r13
     // push r14
     // push r15
+    // pushfq
     // sub rsp,40
     // movaps xmmword ptr ss:[rsp],xmm0
     // movaps xmmword ptr ss:[rsp+10],xmm1
     // movaps xmmword ptr ss:[rsp+20],xmm2
     // movaps xmmword ptr ss:[rsp+30],xmm3
+    // mov rax,rsp
+    // push 0
+    // test rsp,8
+    // je _next
+    // push 1
+    // _next:
     buf.write(&[
-        0x9C, 0x48, 0xF7, 0xC4, 0x08, 0x00, 0x00, 0x00, 0x74, 0x10, 0x50, 0x48, 0x8B, 0x44, 0x24,
-        0x08, 0xC7, 0x44, 0x24, 0x08, 0x00, 0x00, 0x00, 0x00, 0xEB, 0x12, 0x48, 0x83, 0xEC, 0x08,
-        0x50, 0x48, 0x8B, 0x44, 0x24, 0x10, 0xC7, 0x44, 0x24, 0x08, 0x01, 0x00, 0x00, 0x00, 0x50,
-        0x53, 0x51, 0x52, 0x56, 0x57, 0x54, 0x55, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41, 0x53,
-        0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40, 0x0F, 0x29, 0x04,
-        0x24, 0x0F, 0x29, 0x4C, 0x24, 0x10, 0x0F, 0x29, 0x54, 0x24, 0x20, 0x0F, 0x29, 0x5C, 0x24,
-        0x30,
+        0x54, 0x53, 0x50, 0x51, 0x52, 0x56, 0x57, 0x55, 0x41, 0x50, 0x41, 0x51, 0x41, 0x52, 0x41,
+        0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x9C, 0x48, 0x83, 0xEC, 0x40, 0x0F,
+        0x29, 0x04, 0x24, 0x0F, 0x29, 0x4C, 0x24, 0x10, 0x0F, 0x29, 0x54, 0x24, 0x20, 0x0F, 0x29,
+        0x5C, 0x24, 0x30, 0x48, 0x89, 0xE0, 0x6A, 0x00, 0x48, 0xF7, 0xC4, 0x08, 0x00, 0x00, 0x00,
+        0x74, 0x02, 0x6A, 0x01,
     ])
 }
 
 fn write_stub_epilog1(buf: &mut impl Write) -> Result<usize, std::io::Error> {
+    // pop rcx
+    // test cl,1
+    // je _next
+    // pop rcx
+    // _next:
     // movaps xmm0,xmmword ptr ss:[rsp]
     // movaps xmm1,xmmword ptr ss:[rsp+10]
     // movaps xmm2,xmmword ptr ss:[rsp+20]
     // movaps xmm3,xmmword ptr ss:[rsp+30]
     // add rsp,40
+    // popfq
     // pop r15
     // pop r14
     // pop r13
@@ -385,58 +383,38 @@ fn write_stub_epilog1(buf: &mut impl Write) -> Result<usize, std::io::Error> {
     // pop r9
     // pop r8
     // pop rbp
-    // pop rsp
     // pop rdi
     // pop rsi
     // pop rdx
     // pop rcx
-    // pop rbx
     buf.write(&[
-        0x0F, 0x28, 0x04, 0x24, 0x0F, 0x28, 0x4C, 0x24, 0x10, 0x0F, 0x28, 0x54, 0x24, 0x20, 0x0F,
-        0x28, 0x5C, 0x24, 0x30, 0x48, 0x83, 0xC4, 0x40, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41,
-        0x5C, 0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x5D, 0x5C, 0x5F, 0x5E, 0x5A, 0x59,
-        0x5B,
+        0x59, 0xF6, 0xC1, 0x01, 0x74, 0x01, 0x59, 0x0F, 0x28, 0x04, 0x24, 0x0F, 0x28, 0x4C, 0x24,
+        0x10, 0x0F, 0x28, 0x54, 0x24, 0x20, 0x0F, 0x28, 0x5C, 0x24, 0x30, 0x48, 0x83, 0xC4, 0x40,
+        0x9D, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41, 0x5C, 0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59,
+        0x41, 0x58, 0x5D, 0x5F, 0x5E, 0x5A, 0x59,
     ])
 }
 
 fn write_stub_epilog2_common(buf: &mut impl Write) -> Result<usize, std::io::Error> {
-    // test dword ptr ss:[rsp+10],1
-    // je _branch1
-    // popfq
     // pop rax
-    // add rsp,10
-    // jmp _branch2
-    // _branch1:
-    // popfq
-    // pop rax
-    // add rsp,8
-    // _branch2:
-    buf.write(&[
-        0xF7, 0x44, 0x24, 0x10, 0x01, 0x00, 0x00, 0x00, 0x74, 0x08, 0x9D, 0x58, 0x48, 0x83, 0xC4,
-        0x10, 0xEB, 0x06, 0x9D, 0x58, 0x48, 0x83, 0xC4, 0x08,
-    ])
+    // pop rbx
+    // pop rsp
+    buf.write(&[0x58, 0x5B, 0x5C])
+}
+
+fn write_stub_epilog2_retn(buf: &mut impl Write) -> Result<usize, std::io::Error> {
+    // pop rbx
+    // pop rbx
+    // pop rsp
+    buf.write(&[0x5B, 0x5B, 0x5C])
 }
 
 fn write_stub_epilog2_jmp_ret(buf: &mut impl Write) -> Result<usize, std::io::Error> {
-    // test dword ptr ss:[rsp+10],1
-    // je _branch1
-    // popfq
-    // mov qword ptr ss:[rsp+10],rax
-    // pop rax
-    // add rsp,10
-    // jmp _branch2
-    // _branch1:
-    // popfq
-    // mov qword ptr ss:[rsp+8],rax
-    // pop rax
-    // add rsp,8
-    // _branch2:
-    // jmp qword ptr ss:[rsp-8]
-    buf.write(&[
-        0xF7, 0x44, 0x24, 0x10, 0x01, 0x00, 0x00, 0x00, 0x74, 0x0D, 0x9D, 0x48, 0x89, 0x44, 0x24,
-        0x10, 0x58, 0x48, 0x83, 0xC4, 0x10, 0xEB, 0x0B, 0x9D, 0x48, 0x89, 0x44, 0x24, 0x08, 0x58,
-        0x48, 0x83, 0xC4, 0x08, 0xFF, 0x64, 0x24, 0xF8,
-    ])
+    // pop rbx
+    // pop rbx
+    // pop rsp
+    // jmp rax
+    buf.write(&[0x5B, 0x5B, 0x5C, 0xFF, 0xE0])
 }
 
 fn jmp_addr<T: Write>(addr: u64, buf: &mut T) -> Result<(), HookError> {
@@ -470,10 +448,10 @@ fn generate_jmp_back_stub<T: Write + Seek>(
     // mov rdx, ori_addr
     buf.write(&[0x48, 0xba])?;
     buf.write(&(ori_addr as u64).to_le_bytes())?;
-    // mov rcx, rsp
+    // mov rcx, rax
     // sub rsp, 0x10
     // mov rax, cb
-    buf.write(&[0x48, 0x89, 0xe1, 0x48, 0x83, 0xec, 0x10, 0x48, 0xb8])?;
+    buf.write(&[0x48, 0x89, 0xc1, 0x48, 0x83, 0xec, 0x10, 0x48, 0xb8])?;
     buf.write(&(cb as usize as u64).to_le_bytes())?;
     // call rax
     // add rsp, 0x10
@@ -501,21 +479,18 @@ fn generate_retn_stub<T: Write + Seek>(
     buf.write(&(ori_addr as u64).to_le_bytes())?;
     let ori_func_addr_off = buf.seek(SeekFrom::Current(0)).unwrap() + 2;
     // mov rdx, ori_func
-    // mov rcx, rsp
+    // mov rcx, rax
     // sub rsp,0x20
     // mov rax, cb
     buf.write(&[
-        0x48, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0xe1, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
+        0x48, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0xc1, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
     ])?;
     buf.write(&(cb as usize as u64).to_le_bytes())?;
     // call rax
     // add rsp, 0x20
-    // mov [rsp + 0xc0], rax
-    buf.write(&[
-        0xff, 0xd0, 0x48, 0x83, 0xc4, 0x20, 0x48, 0x89, 0x84, 0x24, 0xc0, 0x00, 0x00, 0x00,
-    ])?;
+    buf.write(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x20])?;
     write_stub_epilog1(buf)?;
-    write_stub_epilog2_common(buf)?;
+    write_stub_epilog2_retn(buf)?;
     // ret
     buf.write(&[0xc3])?;
 
@@ -545,11 +520,11 @@ fn generate_jmp_addr_stub<T: Write + Seek>(
     buf.write(&(ori_addr as u64).to_le_bytes())?;
     let ori_func_addr_off = buf.seek(SeekFrom::Current(0)).unwrap() + 2;
     // mov rdx, ori_func
-    // mov rcx, rsp
+    // mov rcx, rax
     // sub rsp,0x20
     // mov rax, cb
     buf.write(&[
-        0x48, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0xe1, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
+        0x48, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0xc1, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
     ])?;
     buf.write(&(cb as usize as u64).to_le_bytes())?;
     // call rax
@@ -584,11 +559,11 @@ fn generate_jmp_ret_stub<T: Write + Seek>(
     buf.write(&(ori_addr as u64).to_le_bytes())?;
     let ori_func_addr_off = buf.seek(SeekFrom::Current(0)).unwrap() + 2;
     // mov rdx, ori_func
-    // mov rcx, rsp
+    // mov rcx, rax
     // sub rsp,0x20
     // mov rax, cb
     buf.write(&[
-        0x48, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0xe1, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
+        0x48, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0xc1, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
     ])?;
     buf.write(&(cb as usize as u64).to_le_bytes())?;
     // call rax
@@ -834,8 +809,8 @@ mod tests {
             usize,
             extern "win64" fn(u64, u64, u64, u64, u64) -> u64,
         >(old_func);
-        let arg_y = ((*reg).rsp + 0x28) as *const u64;
-        old_func((&*reg).rcx, 0, 0, 0, *arg_y) as usize + 3
+        let arg_y = (*reg).get_stack(5);
+        old_func((*reg).rcx, 0, 0, 0, arg_y) as usize + 3
     }
     #[test]
     fn test_hook_function() {
