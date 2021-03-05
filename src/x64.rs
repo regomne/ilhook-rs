@@ -825,17 +825,21 @@ mod tests {
     }
 
     #[cfg(test)]
-    extern "sysv64" fn foo(x: u64) -> u64 {
-        x * x
+    extern "win64" fn foo(x: u64, _: u64, _: u64, _: u64, y: u64) -> u64 {
+        x * x + y
     }
     #[cfg(test)]
     unsafe extern "win64" fn on_foo(reg: *mut Registers, old_func: usize, _: usize) -> usize {
-        let old_func = std::mem::transmute::<usize, extern "sysv64" fn(u64) -> u64>(old_func);
-        old_func((&*reg).rdi) as usize + 3
+        let old_func = std::mem::transmute::<
+            usize,
+            extern "win64" fn(u64, u64, u64, u64, u64) -> u64,
+        >(old_func);
+        let arg_y = ((*reg).rsp + 0x28) as *const u64;
+        old_func((&*reg).rcx, 0, 0, 0, *arg_y) as usize + 3
     }
     #[test]
     fn test_hook_function() {
-        assert_eq!(foo(5), 25);
+        assert_eq!(foo(5, 0, 0, 0, 3), 28);
         let hooker = Hooker::new(
             foo as usize,
             HookType::Retn(on_foo),
@@ -843,8 +847,8 @@ mod tests {
             HookFlags::empty(),
         );
         let info = unsafe { hooker.hook().unwrap() };
-        assert_eq!(foo(5), 28);
+        assert_eq!(foo(5, 0, 0, 0, 3), 31);
         unsafe { info.unhook().unwrap() };
-        assert_eq!(foo(5), 25);
+        assert_eq!(foo(5, 0, 0, 0, 3), 28);
     }
 }
