@@ -1,4 +1,4 @@
-use super::*;
+use super::{HookError, cmp};
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::format;
@@ -38,7 +38,7 @@ impl FixedMemory {
             )
         } as usize as u64;
         // If kernel doesn't support MAP_FIXED_NOREPLACE
-        if addr == u64::max_value() && unsafe { *(__errno_location()) } == 95 {
+        if addr == u64::MAX && unsafe { *(__errno_location()) } == 95 {
             addr = unsafe {
                 mmap(
                     block.begin as *mut c_void,
@@ -51,7 +51,7 @@ impl FixedMemory {
             } as usize as u64;
         }
         match addr {
-            0xffffffffffffffff => Err(HookError::MemoryProtect(
+            0xffff_ffff_ffff_ffff => Err(HookError::MemoryProtect(
                 unsafe { *(__errno_location()) } as u32
             )),
             x if x == block.begin || (x >= bound.min && x + len <= bound.max) => Ok(Self {
@@ -72,17 +72,17 @@ impl MemoryLayout {
             .lines()
             .map(|line| {
                 line.map_err(|_| HookError::MemoryLayoutFormat)
-                    .and_then(|s| MemoryBlock::from_string(s))
+                    .and_then(MemoryBlock::from_string)
             })
             .collect::<Result<Vec<_>, _>>()
-            .map(|v| Self(v))
+            .map(Self)
     }
 
     fn find_memory_with_bound(&self, bnd: &Bound) -> Result<MemoryBlock, HookError> {
         //@todo fix: find memory block from middle to edge
         let page_size = unsafe { sysconf(30) } as u64; //_SC_PAGESIZE == 30
         let blocks = &self.0;
-        if blocks.len() == 0 {
+        if blocks.is_empty() {
             return Err(HookError::MemoryAllocation);
         }
         // test the first block
@@ -137,10 +137,8 @@ struct Bound {
 impl Bound {
     fn new(init_addr: u64) -> Self {
         Self {
-            min: init_addr.checked_sub(i32::max_value() as u64).unwrap_or(0),
-            max: init_addr
-                .checked_add(i32::max_value() as u64)
-                .unwrap_or(u64::max_value()),
+            min: init_addr.saturating_sub(i32::MAX as u64),
+            max: init_addr.saturating_add(i32::MAX as u64),
         }
     }
 
@@ -148,12 +146,11 @@ impl Bound {
         Self {
             min: cmp::max(
                 self.min,
-                dest.checked_sub(i32::max_value() as u64).unwrap_or(0),
+                dest.saturating_sub(i32::MAX as u64),
             ),
             max: cmp::min(
                 self.max,
-                dest.checked_add(i32::max_value() as u64)
-                    .unwrap_or(u64::max_value()),
+                dest.saturating_add(i32::MAX as u64),
             ),
         }
     }
