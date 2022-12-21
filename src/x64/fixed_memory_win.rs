@@ -1,9 +1,9 @@
 use super::*;
 
+use core::ffi::c_void;
 use std::mem::{size_of, MaybeUninit};
-use winapi::shared::minwindef::LPVOID;
-use winapi::um::memoryapi::{VirtualAlloc, VirtualFree, VirtualQuery};
-use winapi::um::winnt::{
+use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualFree, VirtualQuery};
+use windows_sys::Win32::System::Memory::{
     MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_FREE, MEM_RELEASE, MEM_RESERVE,
     PAGE_EXECUTE_READWRITE,
 };
@@ -21,7 +21,7 @@ pub(super) struct FixedMemory {
 
 impl Drop for FixedMemory {
     fn drop(&mut self) {
-        unsafe { VirtualFree(self.addr as LPVOID, 0, MEM_RELEASE) };
+        unsafe { VirtualFree(self.addr as *mut c_void, 0, MEM_RELEASE) };
     }
 }
 impl FixedMemory {
@@ -32,10 +32,11 @@ impl FixedMemory {
     }
 
     fn query_and_alloc(addr: u64) -> QueryResult {
+        #[allow(invalid_value)]
         let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { MaybeUninit::uninit().assume_init() };
         let ret = unsafe {
             VirtualQuery(
-                addr as LPVOID,
+                addr as *mut c_void,
                 &mut mbi,
                 size_of::<MEMORY_BASIC_INFORMATION>(),
             )

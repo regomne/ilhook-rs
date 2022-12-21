@@ -6,11 +6,11 @@ use std::io::{Cursor, Seek, SeekFrom, Write};
 use std::slice;
 
 #[cfg(windows)]
-use winapi::shared::minwindef::LPVOID;
+use core::ffi::c_void;
 #[cfg(windows)]
-use winapi::um::errhandlingapi::GetLastError;
+use windows_sys::Win32::Foundation::GetLastError;
 #[cfg(windows)]
-use winapi::um::memoryapi::VirtualProtect;
+use windows_sys::Win32::System::Memory::VirtualProtect;
 
 #[cfg(unix)]
 use libc::{__errno_location, c_void, mprotect, sysconf};
@@ -286,7 +286,7 @@ fn modify_mem_protect(addr: usize, len: usize) -> Result<u32, HookError> {
     let mut old_prot: u32 = 0;
     let old_prot_ptr = &mut old_prot as *mut u32;
     // PAGE_EXECUTE_READWRITE = 0x40
-    let ret = unsafe { VirtualProtect(addr as LPVOID, len, 0x40, old_prot_ptr) };
+    let ret = unsafe { VirtualProtect(addr as *const c_void, len, 0x40, old_prot_ptr) };
     if ret == 0 {
         Err(HookError::MemoryProtect(unsafe { GetLastError() }))
     } else {
@@ -323,7 +323,7 @@ fn modify_mem_protect(addr: usize, len: usize) -> Result<u32, HookError> {
 fn recover_mem_protect(addr: usize, len: usize, old: u32) {
     let mut old_prot: u32 = 0;
     let old_prot_ptr = &mut old_prot as *mut u32;
-    unsafe { VirtualProtect(addr as LPVOID, len, old, old_prot_ptr) };
+    unsafe { VirtualProtect(addr as *const c_void, len, old, old_prot_ptr) };
 }
 
 #[cfg(unix)]
