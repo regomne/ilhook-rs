@@ -1,4 +1,4 @@
-use super::*;
+use super::{cmp, HookError};
 
 use core::ffi::c_void;
 use std::mem::{size_of, MaybeUninit};
@@ -84,7 +84,7 @@ impl FixedMemory {
                     return Ok(addr);
                 }
                 QueryResult::NotUsable(base, _) => {
-                    cur_addr = base.checked_sub(4096).unwrap_or(0);
+                    cur_addr = base.saturating_sub(4096);
                 }
                 QueryResult::Fail => {
                     return Err(HookError::MemoryAllocation);
@@ -103,24 +103,15 @@ struct Bound {
 impl Bound {
     fn new(init_addr: u64) -> Self {
         Self {
-            min: init_addr.checked_sub(i32::max_value() as u64).unwrap_or(0),
-            max: init_addr
-                .checked_add(i32::max_value() as u64)
-                .unwrap_or(u64::max_value()),
+            min: init_addr.saturating_sub(i32::MAX as u64),
+            max: init_addr.saturating_add(i32::MAX as u64),
         }
     }
 
     fn _to_new(self, dest: u64) -> Self {
         Self {
-            min: cmp::max(
-                self.min,
-                dest.checked_sub(i32::max_value() as u64).unwrap_or(0),
-            ),
-            max: cmp::min(
-                self.max,
-                dest.checked_add(i32::max_value() as u64)
-                    .unwrap_or(u64::max_value()),
-            ),
+            min: cmp::max(self.min, dest.saturating_sub(i32::MAX as u64)),
+            max: cmp::min(self.max, dest.saturating_add(i32::MAX as u64)),
         }
     }
 
