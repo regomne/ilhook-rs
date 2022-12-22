@@ -7,11 +7,11 @@ use std::io::{Cursor, Seek, SeekFrom, Write};
 use std::slice;
 
 #[cfg(windows)]
-use winapi::shared::minwindef::LPVOID;
+use core::ffi::c_void;
 #[cfg(windows)]
-use winapi::um::errhandlingapi::GetLastError;
+use windows_sys::Win32::Foundation::GetLastError;
 #[cfg(windows)]
-use winapi::um::memoryapi::VirtualProtect;
+use windows_sys::Win32::System::Memory::VirtualProtect;
 #[cfg(windows)]
 mod fixed_memory_win;
 #[cfg(windows)]
@@ -35,7 +35,7 @@ const JMP_INST_SIZE: usize = 5;
 /// # Arguments
 ///
 /// * regs - The registers
-/// * src_addr - The address that has been hooked
+/// * `src_addr` - The address that has been hooked
 pub type JmpBackRoutine = unsafe extern "win64" fn(regs: *mut Registers, src_addr: usize);
 
 /// The routine used in a `function hook`, which means the Routine will replace the
@@ -45,8 +45,8 @@ pub type JmpBackRoutine = unsafe extern "win64" fn(regs: *mut Registers, src_add
 /// # Arguments
 ///
 /// * regs - The registers
-/// * ori_func_ptr - Original function pointer. Call it after converted to the original function type.
-/// * src_addr - The address that has been hooked
+/// * `ori_func_ptr` - Original function pointer. Call it after converted to the original function type.
+/// * `src_addr` - The address that has been hooked
 ///
 /// Return the new return value of the replaced function.
 pub type RetnRoutine =
@@ -58,8 +58,8 @@ pub type RetnRoutine =
 /// # Arguments
 ///
 /// * regs - The registers
-/// * ori_func_ptr - Original function pointer. Call it after converted to the original function type.
-/// * src_addr - The address that has been hooked
+/// * `ori_func_ptr` - Original function pointer. Call it after converted to the original function type.
+/// * `src_addr` - The address that has been hooked
 pub type JmpToAddrRoutine =
     unsafe extern "win64" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize);
 
@@ -69,8 +69,8 @@ pub type JmpToAddrRoutine =
 /// # Arguments
 ///
 /// * regs - The registers
-/// * ori_func_ptr - Original function pointer. Call it after converted to the original function type.
-/// * src_addr - The address that has been hooked
+/// * `ori_func_ptr` - Original function pointer. Call it after converted to the original function type.
+/// * `src_addr` - The address that has been hooked
 ///
 /// Return the address you want to jump to.
 pub type JmpToRetRoutine =
@@ -166,8 +166,9 @@ impl Registers {
     /// # Safety
     ///
     /// Process may crash if register `rsp` does not point to a valid stack.
+    #[must_use]
     pub unsafe fn get_stack(&self, cnt: usize) -> u64 {
-        *((self.rsp as usize + cnt * 8) as usize as *mut u64)
+        *((self.rsp as usize + cnt * 8) as *mut u64)
     }
 }
 
@@ -205,7 +206,7 @@ pub struct Hooker {
     flags: HookFlags,
 }
 
-/// The hook result returned by Hooker::hook.
+/// The hook result returned by `Hooker::hook`.
 pub struct HookPoint {
     addr: usize,
     #[allow(dead_code)] // we only use the drop trait of the stub
@@ -231,6 +232,7 @@ impl Hooker {
     /// * `hook_type` - The hook type and callback routine.
     /// * `thread_cb` - The callbacks before and after hooking.
     /// * `flags` - Hook flags
+    #[must_use]
     pub fn new(
         addr: usize,
         hook_type: HookType,
@@ -246,7 +248,7 @@ impl Hooker {
         }
     }
 
-    /// Consumes self and execute hooking. Return the HookPoint.
+    /// Consumes self and execute hooking. Return the `HookPoint`.
     ///
     /// # Safety
     ///
@@ -288,10 +290,10 @@ impl HookPoint {
         let ret: Result<(), HookError>;
         if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
             let old_prot = modify_mem_protect(self.addr, JMP_INST_SIZE)?;
-            ret = recover_jmp_with_thread_cb(&self);
+            ret = recover_jmp_with_thread_cb(self);
             recover_mem_protect(self.addr, JMP_INST_SIZE, old_prot);
         } else {
-            ret = recover_jmp_with_thread_cb(&self)
+            ret = recover_jmp_with_thread_cb(self)
         }
         ret
     }
@@ -307,7 +309,7 @@ impl Drop for HookPoint {
 fn get_moving_insts(addr: usize) -> Result<(Vec<Instruction>, Vec<u8>), HookError> {
     let code_slice =
         unsafe { slice::from_raw_parts(addr as *const u8, MAX_INST_LEN * JMP_INST_SIZE) };
-    let mut decoder = Decoder::new(64, &code_slice, DecoderOptions::NONE);
+    let mut decoder = Decoder::new(64, code_slice, DecoderOptions::NONE);
     decoder.set_ip(addr as u64);
 
     let mut total_bytes = 0;
@@ -467,14 +469,14 @@ fn jmp_addr<T: Write>(addr: u64, buf: &mut T) -> Result<(), HookError> {
 }
 
 fn move_code_to_addr(ori_insts: &Vec<Instruction>, dest_addr: u64) -> Result<Vec<u8>, HookError> {
-    let block = InstructionBlock::new(&ori_insts, dest_addr);
+    let block = InstructionBlock::new(ori_insts, dest_addr);
     let encoded = BlockEncoder::encode(64, block, BlockEncoderOptions::NONE)
         .map_err(|_| HookError::MoveCode)?;
     Ok(encoded.code_buffer)
 }
 
 fn write_ori_func_addr<T: Write + Seek>(buf: &mut T, ori_func_addr_off: u64, ori_func_off: u64) {
-    let pos = buf.seek(SeekFrom::Current(0)).unwrap();
+    let pos = buf.stream_position().unwrap();
     buf.seek(SeekFrom::Start(ori_func_addr_off)).unwrap();
     buf.write(&ori_func_off.to_le_bytes()).unwrap();
     buf.seek(SeekFrom::Start(pos)).unwrap();
@@ -502,10 +504,10 @@ fn generate_jmp_back_stub<T: Write + Seek>(
     write_stub_epilog1(buf)?;
     write_stub_epilog2_common(buf)?;
 
-    let cur_pos = buf.seek(SeekFrom::Current(0)).unwrap();
+    let cur_pos = buf.stream_position().unwrap();
     buf.write(&move_code_to_addr(moving_code, stub_base_addr + cur_pos)?)?;
 
-    jmp_addr(ori_addr as u64 + ori_len as u64, buf)?;
+    jmp_addr(ori_addr as u64 + u64::from(ori_len), buf)?;
     Ok(())
 }
 
@@ -520,7 +522,7 @@ fn generate_retn_stub<T: Write + Seek>(
     // mov r8, ori_addr
     buf.write(&[0x49, 0xb8])?;
     buf.write(&(ori_addr as u64).to_le_bytes())?;
-    let ori_func_addr_off = buf.seek(SeekFrom::Current(0)).unwrap() + 2;
+    let ori_func_addr_off = buf.stream_position().unwrap() + 2;
     // mov rdx, ori_func
     // mov rcx, rsp
     // sub rsp,0x20
@@ -540,12 +542,12 @@ fn generate_retn_stub<T: Write + Seek>(
     // ret
     buf.write(&[0xc3])?;
 
-    let ori_func_off = buf.seek(SeekFrom::Current(0)).unwrap();
+    let ori_func_off = buf.stream_position().unwrap();
     buf.write(&move_code_to_addr(
         moving_code,
         stub_base_addr + ori_func_off,
     )?)?;
-    jmp_addr(ori_addr as u64 + ori_len as u64, buf)?;
+    jmp_addr(ori_addr as u64 + u64::from(ori_len), buf)?;
 
     write_ori_func_addr(buf, ori_func_addr_off, stub_base_addr + ori_func_off);
 
@@ -564,7 +566,7 @@ fn generate_jmp_addr_stub<T: Write + Seek>(
     // mov r8, ori_addr
     buf.write(&[0x49, 0xb8])?;
     buf.write(&(ori_addr as u64).to_le_bytes())?;
-    let ori_func_addr_off = buf.seek(SeekFrom::Current(0)).unwrap() + 2;
+    let ori_func_addr_off = buf.stream_position().unwrap() + 2;
     // mov rdx, ori_func
     // mov rcx, rsp
     // sub rsp,0x20
@@ -580,12 +582,12 @@ fn generate_jmp_addr_stub<T: Write + Seek>(
     write_stub_epilog2_common(buf)?;
     jmp_addr(dest_addr as u64, buf)?;
 
-    let ori_func_off = buf.seek(SeekFrom::Current(0)).unwrap();
+    let ori_func_off = buf.stream_position().unwrap();
     buf.write(&move_code_to_addr(
         moving_code,
         stub_base_addr + ori_func_off,
     )?)?;
-    jmp_addr(ori_addr as u64 + ori_len as u64, buf)?;
+    jmp_addr(ori_addr as u64 + u64::from(ori_len), buf)?;
 
     write_ori_func_addr(buf, ori_func_addr_off, stub_base_addr + ori_func_off);
 
@@ -603,7 +605,7 @@ fn generate_jmp_ret_stub<T: Write + Seek>(
     // mov r8, ori_addr
     buf.write(&[0x49, 0xb8])?;
     buf.write(&(ori_addr as u64).to_le_bytes())?;
-    let ori_func_addr_off = buf.seek(SeekFrom::Current(0)).unwrap() + 2;
+    let ori_func_addr_off = buf.stream_position().unwrap() + 2;
     // mov rdx, ori_func
     // mov rcx, rsp
     // sub rsp,0x20
@@ -618,12 +620,12 @@ fn generate_jmp_ret_stub<T: Write + Seek>(
     write_stub_epilog1(buf)?;
     write_stub_epilog2_jmp_ret(buf)?;
 
-    let ori_func_off = buf.seek(SeekFrom::Current(0)).unwrap();
+    let ori_func_off = buf.stream_position().unwrap();
     buf.write(&move_code_to_addr(
         moving_code,
         stub_base_addr + ori_func_off,
     )?)?;
-    jmp_addr(ori_addr as u64 + ori_len as u64, buf)?;
+    jmp_addr(ori_addr as u64 + u64::from(ori_len), buf)?;
 
     write_ori_func_addr(buf, ori_func_addr_off, stub_base_addr + ori_func_off);
 
@@ -685,9 +687,9 @@ fn generate_stub(
 #[cfg(windows)]
 fn modify_mem_protect(addr: usize, len: usize) -> Result<u32, HookError> {
     let mut old_prot: u32 = 0;
-    let old_prot_ptr = &mut old_prot as *mut u32;
+    let old_prot_ptr = std::ptr::addr_of_mut!(old_prot);
     // PAGE_EXECUTE_READWRITE = 0x40
-    let ret = unsafe { VirtualProtect(addr as LPVOID, len, 0x40, old_prot_ptr) };
+    let ret = unsafe { VirtualProtect(addr as *const c_void, len, 0x40, old_prot_ptr) };
     if ret == 0 {
         Err(HookError::MemoryProtect(unsafe { GetLastError() }))
     } else {
@@ -722,8 +724,8 @@ fn modify_mem_protect(addr: usize, len: usize) -> Result<u32, HookError> {
 #[cfg(windows)]
 fn recover_mem_protect(addr: usize, len: usize, old: u32) {
     let mut old_prot: u32 = 0;
-    let old_prot_ptr = &mut old_prot as *mut u32;
-    unsafe { VirtualProtect(addr as LPVOID, len, old, old_prot_ptr) };
+    let old_prot_ptr = std::ptr::addr_of_mut!(old_prot);
+    unsafe { VirtualProtect(addr as *const c_void, len, old, old_prot_ptr) };
 }
 
 #[cfg(unix)]
@@ -742,7 +744,7 @@ fn modify_jmp(dest_addr: usize, stub_addr: usize) -> Result<(), HookError> {
     // jmp stub_addr
     buf[0] = 0xe9;
     let rel_off = stub_addr as i64 - (dest_addr as i64 + 5);
-    if rel_off as i32 as i64 != rel_off {
+    if i64::from(rel_off as i32) != rel_off {
         return Err(HookError::Unknown);
     }
     buf[1..5].copy_from_slice(&(rel_off as i32).to_le_bytes());
@@ -813,7 +815,7 @@ mod tests {
         // jmp @-0x20
         let inst = [0xe9, 0xe0, 0xff, 0xff, 0xff];
         let addr = inst.as_ptr() as u64;
-        let new_inst = move_inst(&inst, addr + 0xffffff);
+        let new_inst = move_inst(&inst, addr + 0x00ff_ffff);
         assert_eq!(new_inst, [233, 225, 255, 255, 254]);
     }
 
@@ -838,7 +840,7 @@ mod tests {
     #[test]
     fn test_fixed_mem() {
         use super::FixedMemory;
-        let m = FixedMemory::allocate(0x7fffffff);
+        let m = FixedMemory::allocate(0x7fff_ffff);
         assert!(m.is_ok());
         let m = m.unwrap();
         assert_ne!(m.addr, 0);
@@ -856,7 +858,7 @@ mod tests {
             extern "win64" fn(u64, u64, u64, u64, u64) -> u64,
         >(old_func);
         let arg_y = ((*reg).rsp + 0x28) as *const u64;
-        old_func((&*reg).rcx, 0, 0, 0, *arg_y) as usize + 3
+        old_func((*reg).rcx, 0, 0, 0, *arg_y) as usize + 3
     }
     #[test]
     fn test_hook_function() {

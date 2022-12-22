@@ -73,7 +73,7 @@ let hooker=Hooker::new(0x40107F, HookType::JmpBack(on_check_sn), CallbackOption:
 //hooker.hook().unwrap(); //commented as hooking is not supported in doc tests
 ```
 
-Then check_serial_number will always go to the successful path.
+Then `check_serial_number` will always go to the successful path.
 
 ## Function hook
 
@@ -129,7 +129,7 @@ The EIP will jump to the value the callback routine returns.
 
 # Notes
 
-This crate is not thread-safe if you don't specify HookFlags::NOT_MODIFY_MEMORY_PROTECT. Of course,
+This crate is not thread-safe if you don't specify `HookFlags::NOT_MODIFY_MEMORY_PROTECT`. Of course,
 you need to modify memory protection of the destination address by yourself if you specify that.
 
 As rust's test run parrallelly, it may crash if not specify `--test-threads=1`.
