@@ -699,7 +699,6 @@ fn modify_mem_protect(addr: usize, len: usize) -> Result<u32, HookError> {
 
 #[cfg(unix)]
 fn modify_mem_protect(addr: usize, len: usize) -> Result<u32, HookError> {
-    use std::convert::TryInto;
     let page_size = unsafe { sysconf(30) }; //_SC_PAGESIZE == 30
     if len > page_size.try_into().unwrap() {
         Err(HookError::InvalidParameter)
