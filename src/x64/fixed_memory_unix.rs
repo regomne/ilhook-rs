@@ -39,7 +39,7 @@ impl FixedMemory {
         } as usize as u64;
         if addr == u64::MAX {
             return Err(HookError::MemoryProtect(
-                87210000 + unsafe { *(__errno_location()) },
+                87210000 + unsafe { *(__errno_location()) } as u32,
             ));
         }
         // If kernel doesn't support MAP_FIXED_NOREPLACE
