@@ -837,13 +837,12 @@ mod tests {
     }
 
     #[test]
-    fn test_fixed_mem() {
+    fn test_fixed_mem() -> Result<(), HookError> {
         use super::FixedMemory;
-        let m = FixedMemory::allocate(0x7fff_ffff);
-        assert!(m.is_ok());
-        let m = m.unwrap();
+        let m = FixedMemory::allocate(0x7fff_ffff)?;
         assert_ne!(m.addr, 0);
         assert_eq!(m.len, 4096);
+        Ok(())
     }
 
     #[cfg(test)]
