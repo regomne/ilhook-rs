@@ -847,7 +847,9 @@ mod tests {
     }
 
     #[cfg(test)]
+    #[inline(never)]
     extern "win64" fn foo(x: u64, _: u64, _: u64, _: u64, y: u64) -> u64 {
+        println!("original foo, x:{}, y:{}", x, y);
         x * x + y
     }
     #[cfg(test)]
