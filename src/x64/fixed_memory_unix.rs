@@ -1,4 +1,4 @@
-use super::{HookError, cmp};
+use super::{cmp, HookError};
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::format;
@@ -37,6 +37,11 @@ impl FixedMemory {
                 0,
             )
         } as usize as u64;
+        if addr == u64::MAX {
+            return Err(HookError::MemoryProtect(
+                87210000 + unsafe { *(__errno_location()) },
+            ));
+        }
         // If kernel doesn't support MAP_FIXED_NOREPLACE
         if addr == u64::MAX && unsafe { *(__errno_location()) } == 95 {
             addr = unsafe {
@@ -51,7 +56,7 @@ impl FixedMemory {
             } as usize as u64;
         }
         match addr {
-            0xffff_ffff_ffff_ffff => Err(HookError::MemoryProtect(
+            u64::MAX => Err(HookError::MemoryProtect(
                 unsafe { *(__errno_location()) } as u32
             )),
             x if x == block.begin || (x >= bound.min && x + len <= bound.max) => Ok(Self {
@@ -144,14 +149,8 @@ impl Bound {
 
     fn _to_new(self, dest: u64) -> Self {
         Self {
-            min: cmp::max(
-                self.min,
-                dest.saturating_sub(i32::MAX as u64),
-            ),
-            max: cmp::min(
-                self.max,
-                dest.saturating_add(i32::MAX as u64),
-            ),
+            min: cmp::max(self.min, dest.saturating_sub(i32::MAX as u64)),
+            max: cmp::min(self.max, dest.saturating_add(i32::MAX as u64)),
         }
     }
 
