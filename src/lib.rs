@@ -11,7 +11,7 @@ like so:
 
 ```toml
 [dependencies]
-ilhook = "1.3"
+ilhook = "1.4"
 ```
 
 # Hook Types

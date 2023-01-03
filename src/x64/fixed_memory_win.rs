@@ -2,6 +2,7 @@ use super::{cmp, HookError};
 
 use core::ffi::c_void;
 use std::mem::{size_of, MaybeUninit};
+use windows_sys::Win32::Foundation::{GetLastError, ERROR_INVALID_PARAMETER};
 use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualFree, VirtualQuery};
 use windows_sys::Win32::System::Memory::{
     MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_FREE, MEM_RELEASE, MEM_RESERVE,
@@ -11,7 +12,8 @@ use windows_sys::Win32::System::Memory::{
 enum QueryResult {
     Success(u64),
     NotUsable(u64, u64),
-    Fail,
+    OverLimit,
+    Fail(u32),
 }
 
 pub(super) struct FixedMemory {
@@ -42,7 +44,14 @@ impl FixedMemory {
             )
         };
         if ret == 0 {
-            QueryResult::Fail
+            let last_err = unsafe { GetLastError() };
+            if last_err == ERROR_INVALID_PARAMETER {
+                // ERROR_INVALID_PARAMETER means lpAddress specifies an address above
+                // the highest memory address accessible to the process. (from MSDN)
+                QueryResult::OverLimit
+            } else {
+                QueryResult::Fail(last_err)
+            }
         } else if mbi.State == MEM_FREE && mbi.RegionSize >= 4096 {
             let mem = unsafe {
                 VirtualAlloc(
@@ -72,8 +81,11 @@ impl FixedMemory {
                 QueryResult::NotUsable(_, size) => {
                     cur_addr += if size > 0 { size } else { 4096 };
                 }
-                QueryResult::Fail => {
-                    return Err(HookError::MemoryAllocation);
+                QueryResult::OverLimit => {
+                    break;
+                }
+                QueryResult::Fail(e) => {
+                    return Err(HookError::MemoryAllocation(e));
                 }
             }
         }
@@ -86,12 +98,15 @@ impl FixedMemory {
                 QueryResult::NotUsable(base, _) => {
                     cur_addr = base.saturating_sub(4096);
                 }
-                QueryResult::Fail => {
-                    return Err(HookError::MemoryAllocation);
+                QueryResult::Fail(e) => {
+                    return Err(HookError::MemoryAllocation(e));
+                }
+                QueryResult::OverLimit => {
+                    return Err(HookError::MemoryAllocation(0));
                 }
             }
         }
-        Err(HookError::MemoryAllocation)
+        Err(HookError::MemorySearching)
     }
 }
 

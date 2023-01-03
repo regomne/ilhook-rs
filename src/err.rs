@@ -13,8 +13,12 @@ pub enum HookError {
     MemoryProtect(u32),
 
     /// Can't allocate memory
-    #[error("memory allocation error")]
-    MemoryAllocation,
+    #[error("memory allocation error, code:{0}")]
+    MemoryAllocation(u32),
+
+    /// Can't allocate a memory block between +/-2GB of hooking address
+    #[error("searching memory failed")]
+    MemorySearching,
 
     /// Can't get memory layout from /proc/${PID}/maps (only in linux)
     #[error("memory layout format error")]

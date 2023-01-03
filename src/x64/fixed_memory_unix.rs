@@ -1,4 +1,4 @@
-use super::{HookError, cmp};
+use super::{cmp, HookError};
 use lazy_static::lazy_static;
 use regex::Regex;
 use std::format;
@@ -52,7 +52,7 @@ impl FixedMemory {
         }
         match addr {
             0xffff_ffff_ffff_ffff => Err(HookError::MemoryProtect(
-                unsafe { *(__errno_location()) } as u32
+                unsafe { *(__errno_location()) } as u32,
             )),
             x if x == block.begin || (x >= bound.min && x + len <= bound.max) => Ok(Self {
                 addr,
@@ -83,7 +83,7 @@ impl MemoryLayout {
         let page_size = unsafe { sysconf(30) } as u64; //_SC_PAGESIZE == 30
         let blocks = &self.0;
         if blocks.is_empty() {
-            return Err(HookError::MemoryAllocation);
+            return Err(HookError::MemoryAllocation(0));
         }
         // test the first block
         if blocks[0].begin > page_size * 2 && bnd.min <= page_size {
@@ -101,7 +101,7 @@ impl MemoryLayout {
                 });
             }
         }
-        Err(HookError::MemoryAllocation)
+        Err(HookError::MemorySearching)
     }
 }
 
@@ -144,14 +144,8 @@ impl Bound {
 
     fn _to_new(self, dest: u64) -> Self {
         Self {
-            min: cmp::max(
-                self.min,
-                dest.saturating_sub(i32::MAX as u64),
-            ),
-            max: cmp::min(
-                self.max,
-                dest.saturating_add(i32::MAX as u64),
-            ),
+            min: cmp::max(self.min, dest.saturating_sub(i32::MAX as u64)),
+            max: cmp::min(self.max, dest.saturating_add(i32::MAX as u64)),
         }
     }
 
