@@ -20,50 +20,54 @@ use crate::err::HookError;
 const MAX_INST_LEN: usize = 15;
 const JMP_INST_SIZE: usize = 5;
 
-/// The routine used in a `jmp-back hook`, which means the EIP will jump back to the
-/// original position after the Routine being run.
+/// This is the routine used in a `jmp-back hook`, which means the EIP will jump back to the
+/// original position after the routine has finished running.
 ///
 /// # Arguments
 ///
-/// * regs - The registers
-/// * `src_addr` - The address that has been hooked
-pub type JmpBackRoutine = unsafe extern "cdecl" fn(regs: *mut Registers, src_addr: usize);
+/// * `regs` - The registers
+/// * `user_data` - User data that was previously passed to [`Hooker::new`].
+pub type JmpBackRoutine = unsafe extern "cdecl" fn(regs: *mut Registers, user_data: usize);
 
-/// The routine used in a `function hook`, which means the Routine will replace the
-/// original FUNCTION, and the EIP will `retn` directly instead of jumping back.
-/// Note that the being-hooked address must be the head of a function.
+/// This is the routine used in a `function hook`, which means the routine will replace the
+/// original function and the EIP will `retn` directly instead of jumping back.
+/// Note that the address being hooked must be the start of a function.
 ///
-/// # Arguments
+/// # Parameters
 ///
-/// * regs - The registers
-/// * `ori_func_ptr` - Original function pointer. Call it after converted to the original function type.
-/// * `src_addr` - The address that has been hooked
+/// * `regs` - The registers.
+/// * `ori_func_ptr` - The original function pointer. Call this after converting it to the original function type.
+/// * `user_data` - User data that was previously passed to [`Hooker::new`].
 ///
-/// Return the new return value of the replaced function.
+/// # Return value
+///
+/// Returns the new return value of the replaced function.
 pub type RetnRoutine =
-    unsafe extern "cdecl" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
+    unsafe extern "cdecl" fn(regs: *mut Registers, ori_func_ptr: usize, user_data: usize) -> usize;
 
-/// The routine used in a `jmp-addr hook`, which means the EIP will jump to the specified
-/// address after the Routine being run.
+/// This is the routine used in a `jmp-addr hook`, which means the EIP will jump to the specified
+/// address after the routine has finished running.
 ///
-/// # Arguments
+/// # Parameters
 ///
-/// * regs - The registers
-/// * `ori_func_ptr` - Original function pointer. Call it after converted to the original function type.
-/// * `src_addr` - The address that has been hooked
+/// * `regs` - The registers.
+/// * `ori_func_ptr` - The original function pointer. Call this after converting it to the original function type.
+/// * `user_data` - User data that was previously passed to [`Hooker::new`].
 pub type JmpToAddrRoutine =
     unsafe extern "cdecl" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize);
 
-/// The routine used in a `jmp-ret hook`, which means the EIP will jump to the return
-/// value of the Routine.
+/// This is the routine used in a `jmp-ret hook`, which means the EIP will jump to the return
+/// value of the routine.
 ///
-/// # Arguments
+/// # Parameters
 ///
-/// * regs - The registers
-/// * `ori_func_ptr` - Original function pointer. Call it after converted to the original function type.
-/// * `src_addr` - The address that has been hooked
+/// * `regs` - The registers.
+/// * `ori_func_ptr` - The original function pointer. Call this after converting it to the original function type.
+/// * `user_data` - User data that was previously passed to [`Hooker::new`].
 ///
-/// Return the address you want to jump to.
+/// # Return value
+///
+/// Returns the address you want to jump to.
 pub type JmpToRetRoutine =
     unsafe extern "cdecl" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
 
@@ -110,7 +114,7 @@ pub struct Registers {
 impl Registers {
     /// Get the value by the index from register `esp`.
     ///
-    /// # Arguments
+    /// # Parameters
     ///
     /// * cnt - The index of the arguments.
     ///
@@ -155,6 +159,7 @@ pub struct Hooker {
     hook_type: HookType,
     thread_cb: CallbackOption,
     flags: HookFlags,
+    user_data: usize,
 }
 
 /// The hook result returned by `Hooker::hook`.
@@ -177,7 +182,7 @@ fn env_lock() {}
 impl Hooker {
     /// Create a new Hooker.
     ///
-    /// # Arguments
+    /// # Parameters
     ///
     /// * `addr` - The being-hooked address.
     /// * `hook_type` - The hook type and callback routine.
@@ -188,6 +193,7 @@ impl Hooker {
         addr: usize,
         hook_type: HookType,
         thread_cb: CallbackOption,
+        user_data: usize,
         flags: HookFlags,
     ) -> Self {
         env_lock();
@@ -195,6 +201,7 @@ impl Hooker {
             addr,
             hook_type,
             thread_cb,
+            user_data,
             flags,
         }
     }
@@ -213,7 +220,7 @@ impl Hooker {
     /// 6. Other unpredictable errors.
     pub unsafe fn hook(self) -> Result<HookPoint, HookError> {
         let (moving_insts, origin) = get_moving_insts(self.addr)?;
-        let stub = generate_stub(&self, moving_insts, origin.len() as u8)?;
+        let stub = generate_stub(&self, moving_insts, origin.len() as u8, self.user_data)?;
         let stub_prot = modify_mem_protect(stub.as_ptr() as usize, stub.len())?;
         if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
             let old_prot = modify_mem_protect(self.addr, JMP_INST_SIZE)?;
@@ -373,10 +380,11 @@ fn generate_jmp_back_stub<T: Write + Seek>(
     ori_addr: u32,
     cb: JmpBackRoutine,
     ori_len: u8,
+    user_data: usize,
 ) -> Result<(), HookError> {
-    // push hooker.addr
+    // push user_data
     buf.write(&[0x68])?;
-    buf.write(&ori_addr.to_le_bytes())?;
+    buf.write(&user_data.to_le_bytes())?;
 
     // push ebp (Registers)
     // call XXXX (dest addr)
@@ -404,10 +412,11 @@ fn generate_retn_stub<T: Write + Seek>(
     retn_val: u16,
     cb: RetnRoutine,
     ori_len: u8,
+    user_data: usize,
 ) -> Result<(), HookError> {
-    // push hooker.addr
+    // push user_data
     buf.write(&[0x68])?;
-    buf.write(&ori_addr.to_le_bytes())?;
+    buf.write(&user_data.to_le_bytes())?;
 
     // push XXXX (original function addr)
     // push ebp (Registers)
@@ -450,10 +459,11 @@ fn generate_jmp_addr_stub<T: Write + Seek>(
     dest_addr: u32,
     cb: JmpToAddrRoutine,
     ori_len: u8,
+    user_data: usize,
 ) -> Result<(), HookError> {
-    // push hooker.addr
+    // push user_data
     buf.write(&[0x68])?;
-    buf.write(&ori_addr.to_le_bytes())?;
+    buf.write(&user_data.to_le_bytes())?;
 
     // push XXXX (original function addr)
     // push ebp (Registers)
@@ -489,10 +499,11 @@ fn generate_jmp_ret_stub<T: Write + Seek>(
     ori_addr: u32,
     cb: JmpToRetRoutine,
     ori_len: u8,
+    user_data: usize,
 ) -> Result<(), HookError> {
-    // push hooker.addr
+    // push user_data
     buf.write(&[0x68])?;
-    buf.write(&ori_addr.to_le_bytes())?;
+    buf.write(&user_data.to_le_bytes())?;
 
     // push XXXX (original function addr)
     // push ebp (Registers)
@@ -526,6 +537,7 @@ fn generate_stub(
     hooker: &Hooker,
     moving_code: Vec<Instruction>,
     ori_len: u8,
+    user_data: usize,
 ) -> Result<Box<[u8; 100]>, HookError> {
     let mut raw_buffer = Box::new([0u8; 100]);
     let stub_addr = raw_buffer.as_ptr() as u32;
@@ -544,6 +556,7 @@ fn generate_stub(
             hooker.addr as u32,
             cb,
             ori_len,
+            user_data,
         ),
         HookType::Retn(val, cb) => generate_retn_stub(
             &mut buf,
@@ -553,6 +566,7 @@ fn generate_stub(
             val as u16,
             cb,
             ori_len,
+            user_data,
         ),
         HookType::JmpToAddr(dest, cb) => generate_jmp_addr_stub(
             &mut buf,
@@ -562,6 +576,7 @@ fn generate_stub(
             dest as u32,
             cb,
             ori_len,
+            user_data,
         ),
         HookType::JmpToRet(cb) => generate_jmp_ret_stub(
             &mut buf,
@@ -570,6 +585,7 @@ fn generate_stub(
             hooker.addr as u32,
             cb,
             ori_len,
+            user_data,
         ),
     }?;
 
@@ -623,13 +639,19 @@ mod tests {
     use super::*;
 
     #[cfg(test)]
+    #[inline(never)]
     fn foo(x: u32) -> u32 {
+        println!("original foo, x:{}", x);
         x * x
     }
     #[cfg(test)]
-    unsafe extern "cdecl" fn on_foo(reg: *mut Registers, old_func: usize, _: usize) -> usize {
+    unsafe extern "cdecl" fn on_foo(
+        reg: *mut Registers,
+        old_func: usize,
+        user_data: usize,
+    ) -> usize {
         let old_func = std::mem::transmute::<usize, fn(u32) -> u32>(old_func);
-        old_func((*reg).get_arg(1)) as usize + 3
+        old_func((*reg).get_arg(1)) as usize + user_data
     }
 
     #[test]
@@ -639,22 +661,29 @@ mod tests {
             foo as usize,
             HookType::Retn(0, on_foo),
             CallbackOption::None,
+            100,
             HookFlags::empty(),
         );
         let info = unsafe { hooker.hook().unwrap() };
-        assert_eq!(foo(5), 28);
+        assert_eq!(foo(5), 125);
         unsafe { info.unhook().unwrap() };
         assert_eq!(foo(5), 25);
     }
 
     #[cfg(test)]
+    #[inline(never)]
     extern "stdcall" fn foo2(x: u32) -> u32 {
+        println!("original foo, x:{}", x);
         x * x
     }
     #[cfg(test)]
-    unsafe extern "cdecl" fn on_foo2(reg: *mut Registers, old_func: usize, _: usize) -> usize {
+    unsafe extern "cdecl" fn on_foo2(
+        reg: *mut Registers,
+        old_func: usize,
+        user_data: usize,
+    ) -> usize {
         let old_func = std::mem::transmute::<usize, extern "stdcall" fn(u32) -> u32>(old_func);
-        old_func((*reg).get_arg(1)) as usize + 3
+        old_func((*reg).get_arg(1)) as usize + user_data
     }
     #[test]
     fn test_hook_function_stdcall() {
@@ -663,10 +692,11 @@ mod tests {
             foo2 as usize,
             HookType::Retn(4, on_foo2),
             CallbackOption::None,
+            100,
             HookFlags::empty(),
         );
         let info = unsafe { hooker.hook().unwrap() };
-        assert_eq!(foo2(5), 28);
+        assert_eq!(foo2(5), 125);
         unsafe { info.unhook().unwrap() };
         assert_eq!(foo2(5), 25);
     }

@@ -1,7 +1,7 @@
 [package]
 name = "ilhook"
 description = "A library that provides methods to inline hook binary codes in x86 and x86_64 architecture"
-version = "1.4.0"
+version = "2.0.0"
 authors = ["regomne <fallingsunz@gmail.com>"]
 edition = "2021"
 license = "MIT"
@@ -13,7 +13,7 @@ categories = ["hardware-support"]
 [dependencies]
 iced-x86 = { version = "1.10", default-features = false, features = ["std", "decoder", "block_encoder"] }
 thiserror = "1.0"
-bitflags = "1.2"
+bitflags = "2.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"

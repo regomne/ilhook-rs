@@ -11,7 +11,7 @@ like so:
 
 ```toml
 [dependencies]
-ilhook = "1.4"
+ilhook = "2"
 ```
 
 # Hook Types
@@ -69,7 +69,7 @@ unsafe extern "C" fn on_check_sn(reg:*mut Registers, _:usize){
 }
 
 # #[cfg(target_arch = "x86")]
-let hooker=Hooker::new(0x40107F, HookType::JmpBack(on_check_sn), CallbackOption::None, HookFlags::empty());
+let hooker=Hooker::new(0x40107F, HookType::JmpBack(on_check_sn), CallbackOption::None, 0, HookFlags::empty());
 //hooker.hook().unwrap(); //commented as hooking is not supported in doc tests
 ```
 
@@ -108,7 +108,7 @@ unsafe extern "win64" fn new_foo(reg:*mut Registers, _:usize, _:usize)->usize{
 }
 
 # #[cfg(target_arch = "x86_64")]
-let hooker=Hooker::new(foo as usize, HookType::Retn(new_foo), CallbackOption::None, HookFlags::empty());
+let hooker=Hooker::new(foo as usize, HookType::Retn(new_foo), CallbackOption::None, 0, HookFlags::empty());
 unsafe{hooker.hook().unwrap()};
 //assert_eq!(foo(5), 28); //commented as hooking is not supported in doc tests
 ```

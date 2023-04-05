@@ -29,52 +29,56 @@ use crate::err::HookError;
 const MAX_INST_LEN: usize = 15;
 const JMP_INST_SIZE: usize = 5;
 
-/// The routine used in a `jmp-back hook`, which means the EIP will jump back to the
-/// original position after the Routine being run.
+/// This is the routine used in a `jmp-back hook`, which means the RIP will jump back to the
+/// original position after the routine has finished running.
 ///
-/// # Arguments
+/// # Parameters
 ///
-/// * regs - The registers
-/// * `src_addr` - The address that has been hooked
-pub type JmpBackRoutine = unsafe extern "win64" fn(regs: *mut Registers, src_addr: usize);
+/// * `regs` - The registers.
+/// * `user_data` - User data that was previously passed to [`Hooker::new`].
+pub type JmpBackRoutine = unsafe extern "win64" fn(regs: *mut Registers, user_data: usize);
 
-/// The routine used in a `function hook`, which means the Routine will replace the
-/// original FUNCTION, and the EIP will `retn` directly instead of jumping back.
-/// Note that the being-hooked address must be the head of a function.
+/// This is the routine used in a `function hook`, which means the routine will replace the
+/// original function and the RIP will `retn` directly instead of jumping back.
+/// Note that the address being hooked must be the start of a function.
 ///
-/// # Arguments
+/// # Parameters
 ///
-/// * regs - The registers
-/// * `ori_func_ptr` - Original function pointer. Call it after converted to the original function type.
-/// * `src_addr` - The address that has been hooked
+/// * `regs` - The registers.
+/// * `ori_func_ptr` - The original function pointer. Call this after converting it to the original function type.
+/// * `user_data` - User data that was previously passed to [`Hooker::new`].
 ///
-/// Return the new return value of the replaced function.
+/// # Return value
+///
+/// Returns the new return value of the replaced function.
 pub type RetnRoutine =
-    unsafe extern "win64" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
+    unsafe extern "win64" fn(regs: *mut Registers, ori_func_ptr: usize, user_data: usize) -> usize;
 
-/// The routine used in a `jmp-addr hook`, which means the EIP will jump to the specified
-/// address after the Routine being run.
+/// This is the routine used in a `jmp-addr hook`, which means the RIP will jump to the specified
+/// address after the routine has finished running.
 ///
-/// # Arguments
+/// # Parameters
 ///
-/// * regs - The registers
-/// * `ori_func_ptr` - Original function pointer. Call it after converted to the original function type.
-/// * `src_addr` - The address that has been hooked
+/// * `regs` - The registers.
+/// * `ori_func_ptr` - The original function pointer. Call this after converting it to the original function type.
+/// * `user_data` - User data that was previously passed to [`Hooker::new`].
 pub type JmpToAddrRoutine =
-    unsafe extern "win64" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize);
+    unsafe extern "win64" fn(regs: *mut Registers, ori_func_ptr: usize, user_data: usize);
 
-/// The routine used in a `jmp-ret hook`, which means the EIP will jump to the return
-/// value of the Routine.
+/// This is the routine used in a `jmp-ret hook`, which means the RIP will jump to the return
+/// value of the routine.
 ///
-/// # Arguments
+/// # Parameters
 ///
-/// * regs - The registers
-/// * `ori_func_ptr` - Original function pointer. Call it after converted to the original function type.
-/// * `src_addr` - The address that has been hooked
+/// * `regs` - The registers.
+/// * `ori_func_ptr` - The original function pointer. Call this after converting it to the original function type.
+/// * `user_data` - User data that was previously passed to [`Hooker::new`].
 ///
-/// Return the address you want to jump to.
+/// # Return value
+///
+/// Returns the address you want to jump to.
 pub type JmpToRetRoutine =
-    unsafe extern "win64" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
+    unsafe extern "win64" fn(regs: *mut Registers, ori_func_ptr: usize, user_data: usize) -> usize;
 
 /// The hooking type.
 pub enum HookType {
@@ -159,7 +163,7 @@ pub struct Registers {
 impl Registers {
     /// Get the value by index.
     ///
-    /// # Arguments
+    /// # Parameters
     ///
     /// * cnt - The index of the arguments.
     ///
@@ -192,7 +196,8 @@ pub enum CallbackOption {
 bitflags! {
     /// Hook flags
     pub struct HookFlags:u32 {
-        /// If set, will not modify the memory protection of the destination address
+        /// If set, will not modify the memory protection of the destination address, so that
+        /// the `hook` function could be ALMOST thread-safe.
         const NOT_MODIFY_MEMORY_PROTECT = 0x1;
     }
 }
@@ -203,6 +208,7 @@ pub struct Hooker {
     addr: usize,
     hook_type: HookType,
     thread_cb: CallbackOption,
+    user_data: usize,
     flags: HookFlags,
 }
 
@@ -226,7 +232,7 @@ fn env_lock() {}
 impl Hooker {
     /// Create a new Hooker.
     ///
-    /// # Arguments
+    /// # Parameters
     ///
     /// * `addr` - The being-hooked address.
     /// * `hook_type` - The hook type and callback routine.
@@ -237,6 +243,7 @@ impl Hooker {
         addr: usize,
         hook_type: HookType,
         thread_cb: CallbackOption,
+        user_data: usize,
         flags: HookFlags,
     ) -> Self {
         env_lock();
@@ -244,6 +251,7 @@ impl Hooker {
             addr,
             hook_type,
             thread_cb,
+            user_data,
             flags,
         }
     }
@@ -261,7 +269,7 @@ impl Hooker {
     /// 5. Other unpredictable errors.
     pub unsafe fn hook(self) -> Result<HookPoint, HookError> {
         let (moving_insts, origin) = get_moving_insts(self.addr)?;
-        let stub = generate_stub(&self, moving_insts, origin.len() as u8)?;
+        let stub = generate_stub(&self, moving_insts, origin.len() as u8, self.user_data)?;
         if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
             let old_prot = modify_mem_protect(self.addr, JMP_INST_SIZE)?;
             let ret = modify_jmp_with_thread_cb(&self, stub.addr as usize);
@@ -332,7 +340,8 @@ fn write_stub_prolog(buf: &mut impl Write) -> Result<usize, std::io::Error> {
     // push rsp
     // pushfq
     // test rsp,8
-    // je _branch1
+    // je _stack_aligned_16
+    // ; stack not aligned to 16
     // push rax
     // sub rsp,0x10
     // mov rax, [rsp+0x20] # rsp
@@ -342,8 +351,8 @@ fn write_stub_prolog(buf: &mut impl Write) -> Result<usize, std::io::Error> {
     // mov rax, [rsp+0x10] # rax
     // mov [rsp+0x18], rax
     // mov dword ptr [rsp+0x10],1 # stack flag
-    // jmp _branch2
-    // _branch1:
+    // jmp _other_registers
+    // _stack_aligned_16:
     // push rax
     // push rax
     // mov rax, [rsp+0x18] # rsp
@@ -353,7 +362,7 @@ fn write_stub_prolog(buf: &mut impl Write) -> Result<usize, std::io::Error> {
     // mov rax,[rsp+0x10] # rflags
     // mov [rsp+8], rax
     // mov dword ptr [rsp+0x10], 0 # stack flag
-    // _branch2:
+    // _other_registers:
     // push rbx
     // push rcx
     // push rdx
@@ -489,10 +498,11 @@ fn generate_jmp_back_stub<T: Write + Seek>(
     ori_addr: usize,
     cb: JmpBackRoutine,
     ori_len: u8,
+    user_data: usize,
 ) -> Result<(), HookError> {
-    // mov rdx, ori_addr
+    // mov rdx, user_data
     buf.write(&[0x48, 0xba])?;
-    buf.write(&(ori_addr as u64).to_le_bytes())?;
+    buf.write(&(user_data as u64).to_le_bytes())?;
     // mov rcx, rsp
     // sub rsp, 0x10
     // mov rax, cb
@@ -518,10 +528,11 @@ fn generate_retn_stub<T: Write + Seek>(
     ori_addr: usize,
     cb: RetnRoutine,
     ori_len: u8,
+    user_data: usize,
 ) -> Result<(), HookError> {
-    // mov r8, ori_addr
+    // mov r8, user_data
     buf.write(&[0x49, 0xb8])?;
-    buf.write(&(ori_addr as u64).to_le_bytes())?;
+    buf.write(&(user_data as u64).to_le_bytes())?;
     let ori_func_addr_off = buf.stream_position().unwrap() + 2;
     // mov rdx, ori_func
     // mov rcx, rsp
@@ -562,10 +573,11 @@ fn generate_jmp_addr_stub<T: Write + Seek>(
     dest_addr: usize,
     cb: JmpToAddrRoutine,
     ori_len: u8,
+    user_data: usize,
 ) -> Result<(), HookError> {
-    // mov r8, ori_addr
+    // mov r8, user_data
     buf.write(&[0x49, 0xb8])?;
-    buf.write(&(ori_addr as u64).to_le_bytes())?;
+    buf.write(&(user_data as u64).to_le_bytes())?;
     let ori_func_addr_off = buf.stream_position().unwrap() + 2;
     // mov rdx, ori_func
     // mov rcx, rsp
@@ -601,10 +613,11 @@ fn generate_jmp_ret_stub<T: Write + Seek>(
     ori_addr: usize,
     cb: JmpToRetRoutine,
     ori_len: u8,
+    user_data: usize,
 ) -> Result<(), HookError> {
-    // mov r8, ori_addr
+    // mov r8, user_data
     buf.write(&[0x49, 0xb8])?;
-    buf.write(&(ori_addr as u64).to_le_bytes())?;
+    buf.write(&(user_data as u64).to_le_bytes())?;
     let ori_func_addr_off = buf.stream_position().unwrap() + 2;
     // mov rdx, ori_func
     // mov rcx, rsp
@@ -636,6 +649,7 @@ fn generate_stub(
     hooker: &Hooker,
     moving_code: Vec<Instruction>,
     ori_len: u8,
+    user_data: usize,
 ) -> Result<FixedMemory, HookError> {
     let fix_mem = FixedMemory::allocate(hooker.addr as u64)?;
     let p = unsafe {
@@ -653,6 +667,7 @@ fn generate_stub(
             hooker.addr,
             cb,
             ori_len,
+            user_data,
         ),
         HookType::Retn(cb) => generate_retn_stub(
             &mut buf,
@@ -661,6 +676,7 @@ fn generate_stub(
             hooker.addr,
             cb,
             ori_len,
+            user_data,
         ),
         HookType::JmpToAddr(dest_addr, cb) => generate_jmp_addr_stub(
             &mut buf,
@@ -670,6 +686,7 @@ fn generate_stub(
             dest_addr,
             cb,
             ori_len,
+            user_data,
         ),
         HookType::JmpToRet(cb) => generate_jmp_ret_stub(
             &mut buf,
@@ -678,6 +695,7 @@ fn generate_stub(
             hooker.addr,
             cb,
             ori_len,
+            user_data,
         ),
     }?;
 
@@ -848,18 +866,23 @@ mod tests {
 
     #[cfg(test)]
     #[inline(never)]
+    // 5 arguments to ensure using stack instead of registers to pass parameter(s)
     extern "win64" fn foo(x: u64, _: u64, _: u64, _: u64, y: u64) -> u64 {
         println!("original foo, x:{}, y:{}", x, y);
         x * x + y
     }
     #[cfg(test)]
-    unsafe extern "win64" fn on_foo(reg: *mut Registers, old_func: usize, _: usize) -> usize {
+    unsafe extern "win64" fn on_foo(
+        reg: *mut Registers,
+        old_func: usize,
+        user_data: usize,
+    ) -> usize {
         let old_func = std::mem::transmute::<
             usize,
             extern "win64" fn(u64, u64, u64, u64, u64) -> u64,
         >(old_func);
         let arg_y = ((*reg).rsp + 0x28) as *const u64;
-        old_func((*reg).rcx, 0, 0, 0, *arg_y) as usize + 3
+        old_func((*reg).rcx, 0, 0, 0, *arg_y) as usize + user_data
     }
     #[test]
     fn test_hook_function() {
@@ -868,10 +891,11 @@ mod tests {
             foo as usize,
             HookType::Retn(on_foo),
             CallbackOption::None,
+            100,
             HookFlags::empty(),
         );
         let info = unsafe { hooker.hook().unwrap() };
-        assert_eq!(foo(5, 0, 0, 0, 3), 31);
+        assert_eq!(foo(5, 0, 0, 0, 3), 128);
         unsafe { info.unhook().unwrap() };
         assert_eq!(foo(5, 0, 0, 0, 3), 28);
     }

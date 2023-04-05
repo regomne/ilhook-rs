@@ -1,7 +1,6 @@
 ilhook
 ----
 
-[![Build status](https://travis-ci.org/regomne/ilhook-rs.svg?branch=master)](https://travis-ci.org/regomne/ilhook-rs)
 [![](http://meritbadge.herokuapp.com/ilhook)](https://crates.io/crates/ilhook)
 
 This crate provides methods to inline hook binary codes of `x86` and `x64` instruction sets.
@@ -16,7 +15,7 @@ like so:
 
 ```toml
 [dependencies]
-ilhook = "1.4"
+ilhook = "2"
 ```
 
 # Hook Types
@@ -78,6 +77,7 @@ let hooker = Hooker::new(
     0x40107F,
     HookType::JmpBack(on_check_sn),
     CallbackOption::None,
+    0,
     HookFlags::empty(),
 );
 hooker.hook().unwrap();
@@ -120,6 +120,7 @@ let hooker = Hooker::new(
     foo as usize,
     HookType::Retn(new_foo),
     CallbackOption::None,
+    0,
     HookFlags::empty(),
 );
 unsafe { hooker.hook().unwrap() };
