@@ -2,7 +2,6 @@ use bitflags::bitflags;
 use iced_x86::{
     BlockEncoder, BlockEncoderOptions, Decoder, DecoderOptions, Instruction, InstructionBlock,
 };
-use std::cmp;
 use std::io::{Cursor, Seek, SeekFrom, Write};
 use std::slice;
 
@@ -12,22 +11,14 @@ use core::ffi::c_void;
 use windows_sys::Win32::Foundation::GetLastError;
 #[cfg(windows)]
 use windows_sys::Win32::System::Memory::VirtualProtect;
-#[cfg(windows)]
-mod fixed_memory_win;
-#[cfg(windows)]
-use fixed_memory_win::FixedMemory;
 
 #[cfg(unix)]
 use libc::{__errno_location, c_void, mprotect, sysconf};
-#[cfg(unix)]
-mod fixed_memory_unix;
-#[cfg(unix)]
-use fixed_memory_unix::FixedMemory;
 
 use crate::err::HookError;
 
 const MAX_INST_LEN: usize = 15;
-const JMP_INST_SIZE: usize = 5;
+const JMP_INST_SIZE: usize = 14;
 
 /// This is the routine used in a `jmp-back hook`, which means the RIP will jump back to the
 /// original position after the routine has finished running.
@@ -215,8 +206,8 @@ pub struct Hooker {
 /// The hook result returned by `Hooker::hook`.
 pub struct HookPoint {
     addr: usize,
-    #[allow(dead_code)] // we only use the drop trait of the stub
-    stub: FixedMemory,
+    stub: Box<[u8; 4096]>,
+    stub_prot: u32,
     origin: Vec<u8>,
     thread_cb: CallbackOption,
     flags: HookFlags,
@@ -270,17 +261,19 @@ impl Hooker {
     pub unsafe fn hook(self) -> Result<HookPoint, HookError> {
         let (moving_insts, origin) = get_moving_insts(self.addr)?;
         let stub = generate_stub(&self, moving_insts, origin.len() as u8, self.user_data)?;
+        let stub_prot = modify_mem_protect(stub.as_ptr() as usize, stub.len())?;
         if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
             let old_prot = modify_mem_protect(self.addr, JMP_INST_SIZE)?;
-            let ret = modify_jmp_with_thread_cb(&self, stub.addr as usize);
+            let ret = modify_jmp_with_thread_cb(&self, stub.as_ptr() as usize);
             recover_mem_protect(self.addr, JMP_INST_SIZE, old_prot);
             ret?;
         } else {
-            modify_jmp_with_thread_cb(&self, stub.addr as usize)?;
+            modify_jmp_with_thread_cb(&self, stub.as_ptr() as usize)?;
         }
         Ok(HookPoint {
             addr: self.addr,
             stub,
+            stub_prot,
             origin,
             thread_cb: self.thread_cb,
             flags: self.flags,
@@ -303,6 +296,7 @@ impl HookPoint {
         } else {
             ret = recover_jmp_with_thread_cb(self)
         }
+        recover_mem_protect(self.stub.as_ptr() as usize, self.stub.len(), self.stub_prot);
         ret
     }
 }
@@ -650,19 +644,17 @@ fn generate_stub(
     moving_code: Vec<Instruction>,
     ori_len: u8,
     user_data: usize,
-) -> Result<FixedMemory, HookError> {
-    let fix_mem = FixedMemory::allocate(hooker.addr as u64)?;
-    let p = unsafe {
-        slice::from_raw_parts_mut(fix_mem.addr as usize as *mut u8, fix_mem.len as usize)
-    };
-    let mut buf = Cursor::new(p);
+) -> Result<Box<[u8; 4096]>, HookError> {
+    let mut raw_buffer = Box::new([0u8; 4096]);
+    let stub_addr = raw_buffer.as_ptr() as u64;
+    let mut buf = Cursor::new(&mut raw_buffer[..]);
 
     write_stub_prolog(&mut buf)?;
 
     match hooker.hook_type {
         HookType::JmpBack(cb) => generate_jmp_back_stub(
             &mut buf,
-            fix_mem.addr,
+            stub_addr,
             &moving_code,
             hooker.addr,
             cb,
@@ -671,7 +663,7 @@ fn generate_stub(
         ),
         HookType::Retn(cb) => generate_retn_stub(
             &mut buf,
-            fix_mem.addr,
+            stub_addr,
             &moving_code,
             hooker.addr,
             cb,
@@ -680,7 +672,7 @@ fn generate_stub(
         ),
         HookType::JmpToAddr(dest_addr, cb) => generate_jmp_addr_stub(
             &mut buf,
-            fix_mem.addr,
+            stub_addr,
             &moving_code,
             hooker.addr,
             dest_addr,
@@ -690,7 +682,7 @@ fn generate_stub(
         ),
         HookType::JmpToRet(cb) => generate_jmp_ret_stub(
             &mut buf,
-            fix_mem.addr,
+            stub_addr,
             &moving_code,
             hooker.addr,
             cb,
@@ -699,7 +691,7 @@ fn generate_stub(
         ),
     }?;
 
-    Ok(fix_mem)
+    Ok(raw_buffer)
 }
 
 #[cfg(windows)]
@@ -758,13 +750,18 @@ fn recover_mem_protect(addr: usize, _: usize, old: u32) {
 }
 fn modify_jmp(dest_addr: usize, stub_addr: usize) -> Result<(), HookError> {
     let buf = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, JMP_INST_SIZE) };
-    // jmp stub_addr
-    buf[0] = 0xe9;
     let rel_off = stub_addr as i64 - (dest_addr as i64 + 5);
-    if i64::from(rel_off as i32) != rel_off {
-        return Err(HookError::Unknown);
+    if i64::from(rel_off as i32) == rel_off {
+        // Short jmp
+        buf[0] = 0xe9;
+        buf[1..5].copy_from_slice(&(rel_off as i32).to_le_bytes());
+    } else {
+        // Far jmp, but it can fit within a 32 bit relative offset
+        // assuming dest_addr and stub_addr are not too close
+        buf[0] = 0xFF; buf[1] = 0x25; // jmp [rip+0]
+        buf[2..6].copy_from_slice(&0i32.to_le_bytes());
+        buf[6..14].copy_from_slice(&(stub_addr as i64).to_le_bytes());
     }
-    buf[1..5].copy_from_slice(&(rel_off as i32).to_le_bytes());
     Ok(())
 }
 
@@ -852,16 +849,6 @@ mod tests {
         let addr = inst.as_ptr() as u64;
         let new_inst = move_inst(&inst, addr + 0x4000);
         assert_eq!(new_inst, [0x48, 0x8b, 0x1d, 0x1, 0xc0, 0xff, 0xff]);
-    }
-
-    #[test]
-    fn test_fixed_mem() {
-        use super::FixedMemory;
-        let m = FixedMemory::allocate(0x7fff_ffff);
-        assert!(m.is_ok());
-        let m = m.unwrap();
-        assert_ne!(m.addr, 0);
-        assert_eq!(m.len, 4096);
     }
 
     #[cfg(test)]
