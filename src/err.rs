@@ -32,6 +32,10 @@ pub enum HookError {
     #[error("moving code error")]
     MoveCode,
 
+    /// Not supported moving code
+    #[error("not supported moving code")]
+    MovingCodeNotSupported,
+
     /// The pre-hook callback failed
     #[error("pre hook failed")]
     PreHook,
