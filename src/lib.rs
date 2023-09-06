@@ -138,12 +138,13 @@ As rust's test run parrallelly, it may crash if not specify `--test-threads=1`.
 
 #![warn(missing_docs)]
 
+mod callbacks;
 mod err;
-
-pub use err::HookError;
 
 /// The x86 hooker
 pub mod x86;
 
 /// The x64 hooker
 pub mod x64;
+
+pub use err::HookError;

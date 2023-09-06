@@ -5,18 +5,9 @@ mod tests;
 use std::io::{Cursor, Seek, SeekFrom, Write};
 use std::slice;
 
-#[cfg(windows)]
-use core::ffi::c_void;
-#[cfg(unix)]
-use libc::{__errno_location, c_void, mprotect, sysconf};
-#[cfg(windows)]
-use windows_sys::Win32::Foundation::GetLastError;
-#[cfg(windows)]
-use windows_sys::Win32::System::Memory::VirtualProtect;
-
-use bitflags::bitflags;
 use iced_x86::{Decoder, DecoderOptions, Instruction};
 
+use crate::callbacks::*;
 use crate::HookError;
 use move_inst::move_code_to_addr;
 
@@ -92,17 +83,20 @@ pub enum HookType {
 
 /// Jmp type that the `jmp` instruction use.
 pub enum JmpType {
-    /// Direct long jump. `jmp` instruction use 5 bytes, but may fail as memory allocation near the 2GB space may fail.
-    /// `jmp 0xXXXXXXXX`
-    Direct,
+    /// Rip relative jmp, use 14 bytes.
+    /// `jmp qword ptr [rip+0]`
+    RipRelative,
 
-    /// Mov rax and jump. Use 11 bytes.
-    /// `mov rax, 0xXXXXXXXXXXXXXXXX; jmp rax;`
-    MovJmp,
+    /// Direct jmp. Use only 5 bytes. But you need to specify the trampoline address manually
+    /// which must be in +/- 2GB of the hooking address.
+    Direct(usize),
 
-    /// Use 2 jmp instructions to jump. You have to specify the position of the second jmp.
-    /// `jmp 0xXXXXXXXX; some codes; mov rax, 0xXXXXXXXX; jmp rax;`
-    TrampolineJmp(usize),
+    /// Use 2 jmp instructions to jump. Use only 5 bytes,
+    /// but you have to look for and specify a code address to place the second jmp instruction.
+    /// `jmp _SecondJmp`
+    /// `_SecondJmp:`
+    /// `jmp qword ptr [rip+0]`
+    DirectWithRipRelative(usize),
 }
 
 /// The common registers.
@@ -171,53 +165,39 @@ impl Registers {
     }
 }
 
-/// The trait which is called before and after the modifying of the `jmp` instruction.
-/// Usually is used to suspend and resume all other threads, to avoid instruction colliding.
-pub trait ThreadCallback {
-    /// the callback before modifying `jmp` instruction, should return true if success.
-    fn pre(&self) -> bool;
-    /// the callback after modifying `jmp` instruction
-    fn post(&self);
-}
-
-/// Option for thread callback
-pub enum CallbackOption {
-    /// Valid callback
-    Some(Box<dyn ThreadCallback>),
-    /// No callback
-    None,
-}
-
-bitflags! {
-    /// Hook flags
-    pub struct HookFlags:u32 {
-        /// If set, will not modify the memory protection of the destination address, so that
-        /// the `hook` function could be ALMOST thread-safe.
-        const NOT_MODIFY_MEMORY_PROTECT = 0x1;
-    }
-}
-
 /// The entry struct in ilhook.
 /// Please read the main doc to view usage.
-pub struct Hooker {
+pub struct Hooker<'a> {
     addr: usize,
     hook_type: HookType,
-    thread_cb: CallbackOption,
+    options: HookOptions<'a>,
     user_data: usize,
-    jmp_inst_size: usize,
-    flags: HookFlags,
+}
+
+/// Hook options
+pub struct HookOptions<'a> {
+    pub first_jmp_type: JmpType,
+    pub code_modifying_cb: Option<&'a dyn ThreadCallback>,
+    pub code_protect_cb: Option<&'a dyn CodeProtectModifyingCallback>,
+}
+
+impl<'a> Default for HookOptions<'a> {
+    fn default() -> Self {
+        HookOptions {
+            first_jmp_type: JmpType::RipRelative,
+            code_modifying_cb: None,
+            code_protect_cb: Some(&DefaultCodeProtectModifyingCallback),
+        }
+    }
 }
 
 /// The hook result returned by `Hooker::hook`.
 pub struct HookPoint {
     addr: usize,
-    #[allow(dead_code)] // we only use the drop trait of the trampoline
     trampoline: Box<[u8; TRAMPOLINE_MAX_LEN]>,
     trampoline_prot: u32,
     origin: Vec<u8>,
-    thread_cb: CallbackOption,
     jmp_inst_size: usize,
-    flags: HookFlags,
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -227,35 +207,31 @@ fn env_lock() {
 #[cfg(target_arch = "x86_64")]
 fn env_lock() {}
 
-impl Hooker {
+impl<'a> Hooker<'a> {
     /// Create a new Hooker.
     ///
     /// # Parameters
     ///
     /// * `addr` - The being-hooked address.
     /// * `hook_type` - The hook type and callback routine.
-    /// * `thread_cb` - The callbacks before and after hooking.
-    /// * `flags` - Hook flags
+    /// * `options` - Hook options, see [`HookOptions`]
     #[must_use]
     pub fn new(
         addr: usize,
         hook_type: HookType,
-        thread_cb: CallbackOption,
+        options: HookOptions<'a>,
         user_data: usize,
-        flags: HookFlags,
     ) -> Self {
         env_lock();
         Self {
             addr,
             hook_type,
-            thread_cb,
+            options,
             user_data,
-            jmp_inst_size: 14,
-            flags,
         }
     }
 
-    /// Consumes self and execute hooking. Return the `HookPoint`.
+    /// Consumes self and do hooking. Return the [`HookPoint`].
     ///
     /// # Safety
     ///
@@ -706,60 +682,6 @@ fn generate_trampoline(
     Ok(trampoline_buffer)
 }
 
-#[cfg(windows)]
-fn modify_mem_protect(addr: usize, len: usize) -> Result<u32, HookError> {
-    let mut old_prot: u32 = 0;
-    let old_prot_ptr = std::ptr::addr_of_mut!(old_prot);
-    // PAGE_EXECUTE_READWRITE = 0x40
-    let ret = unsafe { VirtualProtect(addr as *const c_void, len, 0x40, old_prot_ptr) };
-    if ret == 0 {
-        Err(HookError::MemoryProtect(unsafe { GetLastError() }))
-    } else {
-        Ok(old_prot)
-    }
-}
-
-#[cfg(unix)]
-fn modify_mem_protect(addr: usize, len: usize) -> Result<u32, HookError> {
-    let page_size = unsafe { sysconf(30) }; //_SC_PAGESIZE == 30
-    if len > page_size.try_into().unwrap() {
-        Err(HookError::InvalidParameter)
-    } else {
-        //(PROT_READ | PROT_WRITE | PROT_EXEC) == 7
-        let ret = unsafe {
-            mprotect(
-                (addr & !(page_size as usize - 1)) as *mut c_void,
-                page_size as usize,
-                7,
-            )
-        };
-        if ret != 0 {
-            let err = unsafe { *(__errno_location()) };
-            Err(HookError::MemoryProtect(err as u32))
-        } else {
-            // it's too complex to get the original memory protection
-            Ok(7)
-        }
-    }
-}
-#[cfg(windows)]
-fn recover_mem_protect(addr: usize, len: usize, old: u32) {
-    let mut old_prot: u32 = 0;
-    let old_prot_ptr = std::ptr::addr_of_mut!(old_prot);
-    unsafe { VirtualProtect(addr as *const c_void, len, old, old_prot_ptr) };
-}
-
-#[cfg(unix)]
-fn recover_mem_protect(addr: usize, _: usize, old: u32) {
-    let page_size = unsafe { sysconf(30) }; //_SC_PAGESIZE == 30
-    unsafe {
-        mprotect(
-            (addr & !(page_size as usize - 1)) as *mut c_void,
-            page_size as usize,
-            old as i32,
-        )
-    };
-}
 fn modify_jmp(dest_addr: usize, trampoline_addr: usize) {
     let buf = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, 14) };
     let distance = trampoline_addr as i64 - (dest_addr as i64 + 5);
