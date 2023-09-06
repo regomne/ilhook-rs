@@ -165,8 +165,8 @@ pub struct Hooker {
 /// The hook result returned by `Hooker::hook`.
 pub struct HookPoint {
     addr: usize,
-    stub: Box<[u8; 100]>,
-    stub_prot: u32,
+    trampoline: Box<[u8; 100]>,
+    trampoline_prot: u32,
     origin: Vec<u8>,
     thread_cb: CallbackOption,
     flags: HookFlags,
@@ -220,20 +220,21 @@ impl Hooker {
     /// 6. Other unpredictable errors.
     pub unsafe fn hook(self) -> Result<HookPoint, HookError> {
         let (moving_insts, origin) = get_moving_insts(self.addr)?;
-        let stub = generate_stub(&self, moving_insts, origin.len() as u8, self.user_data)?;
-        let stub_prot = modify_mem_protect(stub.as_ptr() as usize, stub.len())?;
+        let trampoline =
+            generate_trampoline(&self, moving_insts, origin.len() as u8, self.user_data)?;
+        let trampoline_prot = modify_mem_protect(trampoline.as_ptr() as usize, trampoline.len())?;
         if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
             let old_prot = modify_mem_protect(self.addr, JMP_INST_SIZE)?;
-            let ret = modify_jmp_with_thread_cb(&self, stub.as_ptr() as usize);
+            let ret = modify_jmp_with_thread_cb(&self, trampoline.as_ptr() as usize);
             recover_mem_protect(self.addr, JMP_INST_SIZE, old_prot);
             ret?;
         } else {
-            modify_jmp_with_thread_cb(&self, stub.as_ptr() as usize)?;
+            modify_jmp_with_thread_cb(&self, trampoline.as_ptr() as usize)?;
         }
         Ok(HookPoint {
             addr: self.addr,
-            stub,
-            stub_prot,
+            trampoline,
+            trampoline_prot,
             origin,
             thread_cb: self.thread_cb,
             flags: self.flags,
@@ -256,7 +257,11 @@ impl HookPoint {
         } else {
             ret = recover_jmp_with_thread_cb(self)
         }
-        recover_mem_protect(self.stub.as_ptr() as usize, self.stub.len(), self.stub_prot);
+        recover_mem_protect(
+            self.trampoline.as_ptr() as usize,
+            self.trampoline.len(),
+            self.trampoline_prot,
+        );
         ret
     }
 }
@@ -373,9 +378,9 @@ fn write_ori_func_addr<T: Write + Seek>(buf: &mut T, ori_func_addr_off: u32, ori
     buf.seek(SeekFrom::Start(pos)).unwrap();
 }
 
-fn generate_jmp_back_stub<T: Write + Seek>(
+fn generate_jmp_back_trampoline<T: Write + Seek>(
     buf: &mut T,
-    stub_base_addr: u32,
+    trampoline_base_addr: u32,
     moving_code: &Vec<Instruction>,
     ori_addr: u32,
     cb: JmpBackRoutine,
@@ -389,7 +394,7 @@ fn generate_jmp_back_stub<T: Write + Seek>(
     // push ebp (Registers)
     // call XXXX (dest addr)
     buf.write(&[0x55, 0xe8])?;
-    write_relative_off(buf, stub_base_addr, cb as u32)?;
+    write_relative_off(buf, trampoline_base_addr, cb as u32)?;
 
     // add esp, 0x8
     buf.write(&[0x83, 0xc4, 0x08])?;
@@ -398,15 +403,18 @@ fn generate_jmp_back_stub<T: Write + Seek>(
     buf.write(&[0x9d, 0x61])?;
 
     let cur_pos = buf.stream_position().unwrap() as u32;
-    buf.write(&move_code_to_addr(moving_code, stub_base_addr + cur_pos)?)?;
+    buf.write(&move_code_to_addr(
+        moving_code,
+        trampoline_base_addr + cur_pos,
+    )?)?;
     // jmp back
     buf.write(&[0xe9])?;
-    write_relative_off(buf, stub_base_addr, ori_addr + u32::from(ori_len))
+    write_relative_off(buf, trampoline_base_addr, ori_addr + u32::from(ori_len))
 }
 
-fn generate_retn_stub<T: Write + Seek>(
+fn generate_retn_trampoline<T: Write + Seek>(
     buf: &mut T,
-    stub_base_addr: u32,
+    trampoline_base_addr: u32,
     moving_code: &Vec<Instruction>,
     ori_addr: u32,
     retn_val: u16,
@@ -423,7 +431,7 @@ fn generate_retn_stub<T: Write + Seek>(
     // call XXXX (dest addr)
     let ori_func_addr_off = buf.stream_position().unwrap() + 1;
     buf.write(&[0x68, 0, 0, 0, 0, 0x55, 0xe8])?;
-    write_relative_off(buf, stub_base_addr, cb as u32)?;
+    write_relative_off(buf, trampoline_base_addr, cb as u32)?;
 
     // add esp, 0xc
     buf.write(&[0x83, 0xc4, 0x0c])?;
@@ -441,19 +449,26 @@ fn generate_retn_stub<T: Write + Seek>(
         buf.write(&retn_val.to_le_bytes())?;
     }
     let ori_func_off = buf.stream_position().unwrap() as u32;
-    write_ori_func_addr(buf, ori_func_addr_off as u32, stub_base_addr + ori_func_off);
+    write_ori_func_addr(
+        buf,
+        ori_func_addr_off as u32,
+        trampoline_base_addr + ori_func_off,
+    );
 
     let cur_pos = buf.stream_position().unwrap() as u32;
-    buf.write(&move_code_to_addr(moving_code, stub_base_addr + cur_pos)?)?;
+    buf.write(&move_code_to_addr(
+        moving_code,
+        trampoline_base_addr + cur_pos,
+    )?)?;
 
     // jmp ori_addr
     buf.write(&[0xe9])?;
-    write_relative_off(buf, stub_base_addr, ori_addr + u32::from(ori_len))
+    write_relative_off(buf, trampoline_base_addr, ori_addr + u32::from(ori_len))
 }
 
-fn generate_jmp_addr_stub<T: Write + Seek>(
+fn generate_jmp_addr_trampoline<T: Write + Seek>(
     buf: &mut T,
-    stub_base_addr: u32,
+    trampoline_base_addr: u32,
     moving_code: &Vec<Instruction>,
     ori_addr: u32,
     dest_addr: u32,
@@ -470,7 +485,7 @@ fn generate_jmp_addr_stub<T: Write + Seek>(
     // call XXXX (dest addr)
     let ori_func_addr_off = buf.stream_position().unwrap() + 1;
     buf.write(&[0x68, 0, 0, 0, 0, 0x55, 0xe8])?;
-    write_relative_off(buf, stub_base_addr, cb as u32)?;
+    write_relative_off(buf, trampoline_base_addr, cb as u32)?;
 
     // add esp, 0xc
     buf.write(&[0x83, 0xc4, 0x0c])?;
@@ -479,22 +494,29 @@ fn generate_jmp_addr_stub<T: Write + Seek>(
     buf.write(&[0x9d, 0x61])?;
     // jmp back
     buf.write(&[0xe9])?;
-    write_relative_off(buf, stub_base_addr, dest_addr + u32::from(ori_len))?;
+    write_relative_off(buf, trampoline_base_addr, dest_addr + u32::from(ori_len))?;
 
     let ori_func_off = buf.stream_position().unwrap() as u32;
-    write_ori_func_addr(buf, ori_func_addr_off as u32, stub_base_addr + ori_func_off);
+    write_ori_func_addr(
+        buf,
+        ori_func_addr_off as u32,
+        trampoline_base_addr + ori_func_off,
+    );
 
     let cur_pos = buf.stream_position().unwrap() as u32;
-    buf.write(&move_code_to_addr(moving_code, stub_base_addr + cur_pos)?)?;
+    buf.write(&move_code_to_addr(
+        moving_code,
+        trampoline_base_addr + cur_pos,
+    )?)?;
 
     // jmp ori_addr
     buf.write(&[0xe9])?;
-    write_relative_off(buf, stub_base_addr, ori_addr + u32::from(ori_len))
+    write_relative_off(buf, trampoline_base_addr, ori_addr + u32::from(ori_len))
 }
 
-fn generate_jmp_ret_stub<T: Write + Seek>(
+fn generate_jmp_ret_trampoline<T: Write + Seek>(
     buf: &mut T,
-    stub_base_addr: u32,
+    trampoline_base_addr: u32,
     moving_code: &Vec<Instruction>,
     ori_addr: u32,
     cb: JmpToRetRoutine,
@@ -510,7 +532,7 @@ fn generate_jmp_ret_stub<T: Write + Seek>(
     // call XXXX (dest addr)
     let ori_func_addr_off = buf.stream_position().unwrap() + 1;
     buf.write(&[0x68, 0, 0, 0, 0, 0x55, 0xe8])?;
-    write_relative_off(buf, stub_base_addr, cb as u32)?;
+    write_relative_off(buf, trampoline_base_addr, cb as u32)?;
 
     // add esp, 0xc
     buf.write(&[0x83, 0xc4, 0x0c])?;
@@ -523,24 +545,31 @@ fn generate_jmp_ret_stub<T: Write + Seek>(
     buf.write(&[0xff, 0x64, 0x24, 0xd8])?;
 
     let ori_func_off = buf.stream_position().unwrap() as u32;
-    write_ori_func_addr(buf, ori_func_addr_off as u32, stub_base_addr + ori_func_off);
+    write_ori_func_addr(
+        buf,
+        ori_func_addr_off as u32,
+        trampoline_base_addr + ori_func_off,
+    );
 
     let cur_pos = buf.stream_position().unwrap() as u32;
-    buf.write(&move_code_to_addr(moving_code, stub_base_addr + cur_pos)?)?;
+    buf.write(&move_code_to_addr(
+        moving_code,
+        trampoline_base_addr + cur_pos,
+    )?)?;
 
     // jmp ori_addr
     buf.write(&[0xe9])?;
-    write_relative_off(buf, stub_base_addr, ori_addr + u32::from(ori_len))
+    write_relative_off(buf, trampoline_base_addr, ori_addr + u32::from(ori_len))
 }
 
-fn generate_stub(
+fn generate_trampoline(
     hooker: &Hooker,
     moving_code: Vec<Instruction>,
     ori_len: u8,
     user_data: usize,
 ) -> Result<Box<[u8; 100]>, HookError> {
     let mut raw_buffer = Box::new([0u8; 100]);
-    let stub_addr = raw_buffer.as_ptr() as u32;
+    let trampoline_addr = raw_buffer.as_ptr() as u32;
     let mut buf = Cursor::new(&mut raw_buffer[..]);
 
     // pushad
@@ -549,18 +578,18 @@ fn generate_stub(
     buf.write(&[0x60, 0x9c, 0x8b, 0xec])?;
 
     match hooker.hook_type {
-        HookType::JmpBack(cb) => generate_jmp_back_stub(
+        HookType::JmpBack(cb) => generate_jmp_back_trampoline(
             &mut buf,
-            stub_addr,
+            trampoline_addr,
             &moving_code,
             hooker.addr as u32,
             cb,
             ori_len,
             user_data,
         ),
-        HookType::Retn(val, cb) => generate_retn_stub(
+        HookType::Retn(val, cb) => generate_retn_trampoline(
             &mut buf,
-            stub_addr,
+            trampoline_addr,
             &moving_code,
             hooker.addr as u32,
             val as u16,
@@ -568,9 +597,9 @@ fn generate_stub(
             ori_len,
             user_data,
         ),
-        HookType::JmpToAddr(dest, cb) => generate_jmp_addr_stub(
+        HookType::JmpToAddr(dest, cb) => generate_jmp_addr_trampoline(
             &mut buf,
-            stub_addr,
+            trampoline_addr,
             &moving_code,
             hooker.addr as u32,
             dest as u32,
@@ -578,9 +607,9 @@ fn generate_stub(
             ori_len,
             user_data,
         ),
-        HookType::JmpToRet(cb) => generate_jmp_ret_stub(
+        HookType::JmpToRet(cb) => generate_jmp_ret_trampoline(
             &mut buf,
-            stub_addr,
+            trampoline_addr,
             &moving_code,
             hooker.addr as u32,
             cb,
@@ -592,31 +621,31 @@ fn generate_stub(
     Ok(raw_buffer)
 }
 
-fn modify_jmp(dest_addr: usize, stub_addr: usize) -> Result<(), HookError> {
+fn modify_jmp(dest_addr: usize, trampoline_addr: usize) -> Result<(), HookError> {
     let buf = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, JMP_INST_SIZE) };
-    // jmp stub_addr
+    // jmp trampoline_addr
     buf[0] = 0xe9;
-    let rel_off = stub_addr as i32 - (dest_addr as i32 + 5);
+    let rel_off = trampoline_addr as i32 - (dest_addr as i32 + 5);
     buf[1..5].copy_from_slice(&rel_off.to_le_bytes());
     Ok(())
 }
 
-fn modify_jmp_with_thread_cb(hook: &Hooker, stub_addr: usize) -> Result<(), HookError> {
+fn modify_jmp_with_thread_cb(hook: &Hooker, trampoline_addr: usize) -> Result<(), HookError> {
     if let CallbackOption::Some(cbs) = &hook.thread_cb {
         if !cbs.pre() {
             return Err(HookError::PreHook);
         }
-        let ret = modify_jmp(hook.addr, stub_addr);
+        let ret = modify_jmp(hook.addr, trampoline_addr);
         cbs.post();
         ret
     } else {
-        modify_jmp(hook.addr, stub_addr)
+        modify_jmp(hook.addr, trampoline_addr)
     }
 }
 
 fn recover_jmp(dest_addr: usize, origin: &[u8]) {
     let buf = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, origin.len()) };
-    // jmp stub_addr
+    // jmp trampoline_addr
     buf.copy_from_slice(origin);
 }
 
