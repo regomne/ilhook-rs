@@ -8,6 +8,10 @@ pub enum HookError {
     #[error("invalid parameter")]
     InvalidParameter,
 
+    /// Trampoline address provided by user is too far
+    #[error("unable to direct jmp")]
+    UnableToDirectJmp,
+
     /// Error occurs when modifying the memory protect
     #[error("memory protect error, code:{0}")]
     MemoryProtect(u32),
@@ -36,8 +40,12 @@ pub enum HookError {
     #[error("not supported moving code")]
     MovingCodeNotSupported,
 
-    /// The pre-hook callback failed
-    #[error("pre hook failed")]
+    /// Suspending thread failed
+    #[error("suspending thread failed")]
+    ThreadSuspending(u32),
+
+    /// pre hook
+    #[error("pre hook")]
     PreHook,
 
     /// Some io error

@@ -96,7 +96,7 @@ Now let's hook:
 
 ```rust
 # #[cfg(target_arch = "x86_64")]
-use ilhook::x64::{Hooker, HookType, Registers, CallbackOption, HookFlags};
+use ilhook::x64::{Hooker, HookType, Registers, HookOptions};
 # #[cfg(target_arch = "x86_64")]
 # fn foo(x: u64) -> u64 {
 #     x * x
@@ -108,7 +108,7 @@ unsafe extern "win64" fn new_foo(reg:*mut Registers, _:usize, _:usize)->usize{
 }
 
 # #[cfg(target_arch = "x86_64")]
-let hooker=Hooker::new(foo as usize, HookType::Retn(new_foo), CallbackOption::None, 0, HookFlags::empty());
+let hooker=Hooker::new(foo as usize, HookType::Retn(new_foo), HookOptions::default(), 0);
 unsafe{hooker.hook().unwrap()};
 //assert_eq!(foo(5), 28); //commented as hooking is not supported in doc tests
 ```
@@ -140,6 +140,7 @@ As rust's test run parrallelly, it may crash if not specify `--test-threads=1`.
 
 mod callbacks;
 mod err;
+mod utils;
 
 /// The x86 hooker
 pub mod x86;
@@ -147,4 +148,5 @@ pub mod x86;
 /// The x64 hooker
 pub mod x64;
 
+pub use callbacks::CodeProtectModifyingCallback;
 pub use err::HookError;

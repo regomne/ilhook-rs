@@ -1,4 +1,6 @@
 #[allow(unused_imports)]
+use super::move_inst::move_code_to_addr;
+#[allow(unused_imports)]
 use super::*;
 
 #[cfg(test)]
@@ -243,9 +245,8 @@ fn test_hook_function() {
     let hooker = Hooker::new(
         foo as usize,
         HookType::Retn(on_foo),
-        CallbackOption::None,
+        HookOptions::default(),
         100,
-        HookFlags::empty(),
     );
     let info = unsafe { hooker.hook().unwrap() };
     assert_eq!(foo(5, 0, 0, 0, 3), 128);

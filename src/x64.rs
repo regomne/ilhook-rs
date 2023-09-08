@@ -1,19 +1,20 @@
 mod move_inst;
 #[cfg(target_arch = "x86_64")]
 mod tests;
+mod trampoline;
 
-use std::io::{Cursor, Seek, SeekFrom, Write};
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::slice;
 
 use iced_x86::{Decoder, DecoderOptions, Instruction};
 
 use crate::callbacks::*;
+use crate::utils::{MemoryProtectGuard, ThreadSuspendingGuard};
 use crate::HookError;
-use move_inst::move_code_to_addr;
+use trampoline::*;
 
 const MAX_INST_LEN: usize = 15;
-
-const TRAMPOLINE_MAX_LEN: usize = 1024;
 
 /// This is the routine used in a `jmp-back hook`, which means the RIP will jump back to the
 /// original position after the routine has finished running.
@@ -87,16 +88,29 @@ pub enum JmpType {
     /// `jmp qword ptr [rip+0]`
     RipRelative,
 
-    /// Direct jmp. Use only 5 bytes. But you need to specify the trampoline address manually
-    /// which must be in +/- 2GB of the hooking address.
-    Direct(usize),
+    /// Direct jmp. Use only 5 bytes. You need to specify the trampoline buffer manually.
+    /// Address of the trampoline must be in +/- 2GB of the hooking address.
+    /// Length of the trampoline should be at least 1024 bytes, and the memory protect must be RWE.
+    Direct(*mut u8, usize),
 
-    /// Use 2 jmp instructions to jump. Use only 5 bytes,
-    /// but you have to look for and specify a code address to place the second jmp instruction.
+    /// Use 2 jmp instructions to jump. First of it uses only 5 bytes,
+    /// You need to look for and specify a code address to place the second jmp instruction.
+    /// The address must be in +/- 2GB of the hooking address and the length must be not less than
+    /// 14 bytes. Usually you may try to look for a code gap from the code section of the PE/ELF.
     /// `jmp _SecondJmp`
     /// `_SecondJmp:`
     /// `jmp qword ptr [rip+0]`
     DirectWithRipRelative(usize),
+}
+
+impl JmpType {
+    fn get_jmp_inst_size(&self) -> usize {
+        match &self {
+            JmpType::RipRelative => 14,
+            JmpType::Direct(_, _) => 5,
+            JmpType::DirectWithRipRelative(_) => 5,
+        }
+    }
 }
 
 /// The common registers.
@@ -177,7 +191,7 @@ pub struct Hooker<'a> {
 /// Hook options
 pub struct HookOptions<'a> {
     pub first_jmp_type: JmpType,
-    pub code_modifying_cb: Option<&'a dyn ThreadCallback>,
+    pub thread_operating_cb: Option<&'a dyn ThreadOperatingCallback>,
     pub code_protect_cb: Option<&'a dyn CodeProtectModifyingCallback>,
 }
 
@@ -185,19 +199,20 @@ impl<'a> Default for HookOptions<'a> {
     fn default() -> Self {
         HookOptions {
             first_jmp_type: JmpType::RipRelative,
-            code_modifying_cb: None,
-            code_protect_cb: Some(&DefaultCodeProtectModifyingCallback),
+            thread_operating_cb: None,
+            code_protect_cb: Some(&DEFAULT_CODE_PROTECT_MODIFYING_CALLBACK),
         }
     }
 }
 
 /// The hook result returned by `Hooker::hook`.
-pub struct HookPoint {
+pub struct HookPoint<'a> {
     addr: usize,
-    trampoline: Box<[u8; TRAMPOLINE_MAX_LEN]>,
-    trampoline_prot: u32,
+    trampoline: Trampoline<'a>,
     origin: Vec<u8>,
     jmp_inst_size: usize,
+    thread_operating_cb: Option<&'a dyn ThreadOperatingCallback>,
+    code_protect_cb: Option<&'a dyn CodeProtectModifyingCallback>,
 }
 
 #[cfg(not(target_arch = "x86_64"))]
@@ -242,59 +257,88 @@ impl<'a> Hooker<'a> {
     /// 3. Set `NOT_MODIFY_MEMORY_PROTECT` where it should not be set.
     /// 4. hook or unhook from 2 or more threads at the same time without `HookFlags::NOT_MODIFY_MEMORY_PROTECT`. Because of memory protection colliding.
     /// 5. Other unpredictable errors.
-    pub unsafe fn hook(self) -> Result<HookPoint, HookError> {
-        let (moving_insts, origin) = get_moving_insts(self.addr, self.jmp_inst_size)?;
-        let trampoline =
-            generate_trampoline(&self, moving_insts, origin.len() as u8, self.user_data)?;
-        let trampoline_prot = modify_mem_protect(trampoline.as_ptr() as usize, trampoline.len())?;
-        if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
-            let old_prot = modify_mem_protect(self.addr, self.jmp_inst_size)?;
-            let ret = modify_jmp_with_thread_cb(&self, trampoline.as_ptr() as usize);
-            recover_mem_protect(self.addr, self.jmp_inst_size, old_prot);
-            ret?;
-        } else {
-            modify_jmp_with_thread_cb(&self, trampoline.as_ptr() as usize)?;
-        }
+    pub unsafe fn hook(self) -> Result<HookPoint<'a>, HookError> {
+        self.hook_internal()
+    }
+
+    fn hook_internal(self) -> Result<HookPoint<'a>, HookError> {
+        self.check_jmp_type()?;
+
+        let jmp_inst_size = self.options.first_jmp_type.get_jmp_inst_size();
+        let (moving_insts, origin) = get_moving_insts(self.addr, jmp_inst_size)?;
+        let mut trampoline = match &self.options.first_jmp_type {
+            JmpType::Direct(addr, len) => {
+                let buffer = unsafe { slice::from_raw_parts_mut(*addr, *len) };
+                Trampoline::with_buffer(buffer, &self.options.code_protect_cb)
+            }
+            _ => Trampoline::new(&self.options.code_protect_cb),
+        };
+        let trampoline_addr = trampoline.get_addr();
+        trampoline.generate(
+            self.addr,
+            self.hook_type,
+            &moving_insts,
+            origin.len() as u8,
+            self.user_data,
+        )?;
+
+        MemoryProtectGuard::new(&self.options.code_protect_cb, self.addr, jmp_inst_size).run(
+            || {
+                ThreadSuspendingGuard::new(&self.options.thread_operating_cb).run(|| {
+                    modify_jmp(self.addr, trampoline_addr, &self.options.first_jmp_type);
+                    Ok(())
+                })
+            },
+        )?;
+
         Ok(HookPoint {
             addr: self.addr,
             trampoline,
-            trampoline_prot,
             origin,
-            thread_cb: self.thread_cb,
-            jmp_inst_size: self.jmp_inst_size,
-            flags: self.flags,
+            jmp_inst_size,
+            code_protect_cb: self.options.code_protect_cb,
+            thread_operating_cb: self.options.thread_operating_cb,
+        })
+    }
+
+    fn check_jmp_type(&self) -> Result<(), HookError> {
+        match &self.options.first_jmp_type {
+            JmpType::RipRelative => {}
+            JmpType::Direct(addr, _) => {
+                if ((*addr) as usize).abs_diff(self.addr + 5) > 0x7fff_ffff {
+                    return Err(HookError::UnableToDirectJmp);
+                }
+            }
+            JmpType::DirectWithRipRelative(second_jmp_addr) => {
+                if second_jmp_addr.abs_diff(self.addr + 5) > 0x7fff_ffff {
+                    return Err(HookError::UnableToDirectJmp);
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<'a> HookPoint<'a> {
+    /// Consume self and unhook the address.
+    pub unsafe fn unhook(self) -> Result<(), HookError> {
+        self.unhook_internal()
+    }
+
+    fn unhook_internal(&self) -> Result<(), HookError> {
+        MemoryProtectGuard::new(&self.code_protect_cb, self.addr, self.jmp_inst_size).run(|| {
+            ThreadSuspendingGuard::new(&self.thread_operating_cb).run(|| {
+                recover_jmp(self.addr, &self.origin[0..self.jmp_inst_size]);
+                Ok(())
+            })
         })
     }
 }
 
-impl HookPoint {
-    /// Consume self and unhook the address.
-    pub unsafe fn unhook(self) -> Result<(), HookError> {
-        self.unhook_by_ref()
-    }
-
-    fn unhook_by_ref(&self) -> Result<(), HookError> {
-        let ret: Result<(), HookError>;
-        if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
-            let old_prot = modify_mem_protect(self.addr, self.jmp_inst_size)?;
-            ret = recover_jmp_with_thread_cb(self);
-            recover_mem_protect(self.addr, self.jmp_inst_size, old_prot);
-        } else {
-            ret = recover_jmp_with_thread_cb(self)
-        }
-        recover_mem_protect(
-            self.trampoline.as_ptr() as usize,
-            self.trampoline.len(),
-            self.trampoline_prot,
-        );
-        ret
-    }
-}
-
 // When the HookPoint drops, it should unhook automatically.
-impl Drop for HookPoint {
+impl<'a> Drop for HookPoint<'a> {
     fn drop(&mut self) {
-        self.unhook_by_ref().unwrap_or_default();
+        self.unhook_internal().unwrap_or_default();
     }
 }
 
@@ -322,391 +366,33 @@ fn get_moving_insts(
     Ok((ori_insts, code_slice[0..decoder.position()].into()))
 }
 
-fn write_trampoline_prolog(buf: &mut impl Write) -> Result<usize, std::io::Error> {
-    // push rsp
-    // pushfq
-    // test rsp,8
-    // je _stack_aligned_16
-    // ; stack not aligned to 16
-    // push rax
-    // sub rsp,0x10
-    // mov rax, [rsp+0x20] # rsp
-    // mov [rsp], rax
-    // mov rax, [rsp+0x18] # rflags
-    // mov [rsp+8], rax
-    // mov rax, [rsp+0x10] # rax
-    // mov [rsp+0x18], rax
-    // mov dword ptr [rsp+0x10],1 # stack flag
-    // jmp _other_registers
-    // _stack_aligned_16:
-    // push rax
-    // push rax
-    // mov rax, [rsp+0x18] # rsp
-    // mov [rsp], rax
-    // mov rax, [rsp+8] # rax
-    // mov [rsp+0x18], rax
-    // mov rax,[rsp+0x10] # rflags
-    // mov [rsp+8], rax
-    // mov dword ptr [rsp+0x10], 0 # stack flag
-    // _other_registers:
-    // push rbx
-    // push rcx
-    // push rdx
-    // push rsi
-    // push rdi
-    // push rbp
-    // push r8
-    // push r9
-    // push r10
-    // push r11
-    // push r12
-    // push r13
-    // push r14
-    // push r15
-    // sub rsp,0x40
-    // movaps xmmword ptr ss:[rsp],xmm0
-    // movaps xmmword ptr ss:[rsp+0x10],xmm1
-    // movaps xmmword ptr ss:[rsp+0x20],xmm2
-    // movaps xmmword ptr ss:[rsp+0x30],xmm3
-    buf.write(&[
-        0x54, 0x9C, 0x48, 0xF7, 0xC4, 0x08, 0x00, 0x00, 0x00, 0x74, 0x2C, 0x50, 0x48, 0x83, 0xEC,
-        0x10, 0x48, 0x8B, 0x44, 0x24, 0x20, 0x48, 0x89, 0x04, 0x24, 0x48, 0x8B, 0x44, 0x24, 0x18,
-        0x48, 0x89, 0x44, 0x24, 0x08, 0x48, 0x8B, 0x44, 0x24, 0x10, 0x48, 0x89, 0x44, 0x24, 0x18,
-        0xC7, 0x44, 0x24, 0x10, 0x01, 0x00, 0x00, 0x00, 0xEB, 0x27, 0x50, 0x50, 0x48, 0x8B, 0x44,
-        0x24, 0x18, 0x48, 0x89, 0x04, 0x24, 0x48, 0x8B, 0x44, 0x24, 0x08, 0x48, 0x89, 0x44, 0x24,
-        0x18, 0x48, 0x8B, 0x44, 0x24, 0x10, 0x48, 0x89, 0x44, 0x24, 0x08, 0xC7, 0x44, 0x24, 0x10,
-        0x00, 0x00, 0x00, 0x00, 0x53, 0x51, 0x52, 0x56, 0x57, 0x55, 0x41, 0x50, 0x41, 0x51, 0x41,
-        0x52, 0x41, 0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40,
-        0x0F, 0x29, 0x04, 0x24, 0x0F, 0x29, 0x4C, 0x24, 0x10, 0x0F, 0x29, 0x54, 0x24, 0x20, 0x0F,
-        0x29, 0x5C, 0x24, 0x30,
-    ])
-}
-
-fn write_trampoline_epilog1(buf: &mut impl Write) -> Result<usize, std::io::Error> {
-    // movaps xmm0,xmmword ptr ss:[rsp]
-    // movaps xmm1,xmmword ptr ss:[rsp+0x10]
-    // movaps xmm2,xmmword ptr ss:[rsp+0x20]
-    // movaps xmm3,xmmword ptr ss:[rsp+0x30]
-    // add rsp,0x40
-    // pop r15
-    // pop r14
-    // pop r13
-    // pop r12
-    // pop r11
-    // pop r10
-    // pop r9
-    // pop r8
-    // pop rbp
-    // pop rdi
-    // pop rsi
-    // pop rdx
-    // pop rcx
-    // pop rbx
-    // add rsp,8
-    buf.write(&[
-        0x0F, 0x28, 0x04, 0x24, 0x0F, 0x28, 0x4C, 0x24, 0x10, 0x0F, 0x28, 0x54, 0x24, 0x20, 0x0F,
-        0x28, 0x5C, 0x24, 0x30, 0x48, 0x83, 0xC4, 0x40, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41,
-        0x5C, 0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x5D, 0x5F, 0x5E, 0x5A, 0x59, 0x5B,
-        0x48, 0x83, 0xC4, 0x08,
-    ])
-}
-
-fn write_trampoline_epilog2_common(buf: &mut impl Write) -> Result<usize, std::io::Error> {
-    // test dword ptr ss:[rsp+0x8],1
-    // je _branch1
-    // mov rax, [rsp+0x10]
-    // mov [rsp+0x18], rax
-    // popfq
-    // pop rax
-    // pop rax
-    // pop rax
-    // jmp _branch2
-    // _branch1:
-    // popfq
-    // pop rax
-    // pop rax
-    // _branch2:
-    buf.write(&[
-        0xF7, 0x44, 0x24, 0x08, 0x01, 0x00, 0x00, 0x00, 0x74, 0x10, 0x48, 0x8B, 0x44, 0x24, 0x10,
-        0x48, 0x89, 0x44, 0x24, 0x18, 0x9D, 0x58, 0x58, 0x58, 0xEB, 0x03, 0x9D, 0x58, 0x58,
-    ])
-}
-
-fn write_trampoline_epilog2_jmp_ret(buf: &mut impl Write) -> Result<usize, std::io::Error> {
-    // test dword ptr ss:[rsp+8],1
-    // je _branch1
-    // popfq
-    // mov [rsp], rax
-    // mov rax, [rsp+8]
-    // mov rax, [rsp+0x10]
-    // pop rax
-    // pop rax
-    // pop rax
-    // jmp _branch2
-    // _branch1:
-    // popfq
-    // mov [rsp-8],rax
-    // pop rax
-    // pop rax
-    // _branch2:
-    // jmp qword ptr ss:[rsp-0x18]
-    buf.write(&[
-        0xF7, 0x44, 0x24, 0x08, 0x01, 0x00, 0x00, 0x00, 0x74, 0x14, 0x9D, 0x48, 0x89, 0x04, 0x24,
-        0x48, 0x8B, 0x44, 0x24, 0x08, 0x48, 0x8B, 0x44, 0x24, 0x10, 0x58, 0x58, 0x58, 0xEB, 0x08,
-        0x9D, 0x48, 0x89, 0x44, 0x24, 0xF8, 0x58, 0x58, 0xFF, 0x64, 0x24, 0xE8,
-    ])
-}
-
-fn jmp_addr<T: Write>(addr: u64, buf: &mut T) -> Result<(), HookError> {
-    buf.write(&[0xff, 0x25, 0, 0, 0, 0])?;
-    buf.write(&addr.to_le_bytes())?;
-    Ok(())
-}
-
-fn write_ori_func_addr<T: Write + Seek>(buf: &mut T, ori_func_addr_off: u64, ori_func_off: u64) {
-    let pos = buf.stream_position().unwrap();
-    buf.seek(SeekFrom::Start(ori_func_addr_off)).unwrap();
-    buf.write(&ori_func_off.to_le_bytes()).unwrap();
-    buf.seek(SeekFrom::Start(pos)).unwrap();
-}
-
-fn generate_jmp_back_trampoline<T: Write + Seek>(
-    buf: &mut T,
-    trampoline_base_addr: u64,
-    moving_code: &Vec<Instruction>,
-    ori_addr: usize,
-    cb: JmpBackRoutine,
-    ori_len: u8,
-    user_data: usize,
-) -> Result<(), HookError> {
-    // mov rdx, user_data
-    buf.write(&[0x48, 0xba])?;
-    buf.write(&(user_data as u64).to_le_bytes())?;
-    // mov rcx, rsp
-    // sub rsp, 0x10
-    // mov rax, cb
-    buf.write(&[0x48, 0x89, 0xe1, 0x48, 0x83, 0xec, 0x10, 0x48, 0xb8])?;
-    buf.write(&(cb as usize as u64).to_le_bytes())?;
-    // call rax
-    // add rsp, 0x10
-    buf.write(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x10])?;
-    write_trampoline_epilog1(buf)?;
-    write_trampoline_epilog2_common(buf)?;
-
-    let cur_pos = buf.stream_position().unwrap();
-    buf.write(&move_code_to_addr(
-        moving_code,
-        trampoline_base_addr + cur_pos,
-    )?)?;
-
-    jmp_addr(ori_addr as u64 + u64::from(ori_len), buf)?;
-    Ok(())
-}
-
-fn generate_retn_trampoline<T: Write + Seek>(
-    buf: &mut T,
-    trampoline_base_addr: u64,
-    moving_code: &Vec<Instruction>,
-    ori_addr: usize,
-    cb: RetnRoutine,
-    ori_len: u8,
-    user_data: usize,
-) -> Result<(), HookError> {
-    // mov r8, user_data
-    buf.write(&[0x49, 0xb8])?;
-    buf.write(&(user_data as u64).to_le_bytes())?;
-    let ori_func_addr_off = buf.stream_position().unwrap() + 2;
-    // mov rdx, ori_func
-    // mov rcx, rsp
-    // sub rsp,0x20
-    // mov rax, cb
-    buf.write(&[
-        0x48, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0xe1, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
-    ])?;
-    buf.write(&(cb as usize as u64).to_le_bytes())?;
-    // call rax
-    // add rsp, 0x20
-    // mov [rsp + 0xc8], rax
-    buf.write(&[
-        0xff, 0xd0, 0x48, 0x83, 0xc4, 0x20, 0x48, 0x89, 0x84, 0x24, 0xc8, 0x00, 0x00, 0x00,
-    ])?;
-    write_trampoline_epilog1(buf)?;
-    write_trampoline_epilog2_common(buf)?;
-    // ret
-    buf.write(&[0xc3])?;
-
-    let ori_func_off = buf.stream_position().unwrap();
-    buf.write(&move_code_to_addr(
-        moving_code,
-        trampoline_base_addr + ori_func_off,
-    )?)?;
-    jmp_addr(ori_addr as u64 + u64::from(ori_len), buf)?;
-
-    write_ori_func_addr(buf, ori_func_addr_off, trampoline_base_addr + ori_func_off);
-
-    Ok(())
-}
-
-fn generate_jmp_addr_trampoline<T: Write + Seek>(
-    buf: &mut T,
-    trampoline_base_addr: u64,
-    moving_code: &Vec<Instruction>,
-    ori_addr: usize,
-    dest_addr: usize,
-    cb: JmpToAddrRoutine,
-    ori_len: u8,
-    user_data: usize,
-) -> Result<(), HookError> {
-    // mov r8, user_data
-    buf.write(&[0x49, 0xb8])?;
-    buf.write(&(user_data as u64).to_le_bytes())?;
-    let ori_func_addr_off = buf.stream_position().unwrap() + 2;
-    // mov rdx, ori_func
-    // mov rcx, rsp
-    // sub rsp,0x20
-    // mov rax, cb
-    buf.write(&[
-        0x48, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0xe1, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
-    ])?;
-    buf.write(&(cb as usize as u64).to_le_bytes())?;
-    // call rax
-    // add rsp, 0x20
-    buf.write(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x20])?;
-    write_trampoline_epilog1(buf)?;
-    write_trampoline_epilog2_common(buf)?;
-    jmp_addr(dest_addr as u64, buf)?;
-
-    let ori_func_off = buf.stream_position().unwrap();
-    buf.write(&move_code_to_addr(
-        moving_code,
-        trampoline_base_addr + ori_func_off,
-    )?)?;
-    jmp_addr(ori_addr as u64 + u64::from(ori_len), buf)?;
-
-    write_ori_func_addr(buf, ori_func_addr_off, trampoline_base_addr + ori_func_off);
-
-    Ok(())
-}
-
-fn generate_jmp_ret_trampoline<T: Write + Seek>(
-    buf: &mut T,
-    trampoline_base_addr: u64,
-    moving_code: &Vec<Instruction>,
-    ori_addr: usize,
-    cb: JmpToRetRoutine,
-    ori_len: u8,
-    user_data: usize,
-) -> Result<(), HookError> {
-    // mov r8, user_data
-    buf.write(&[0x49, 0xb8])?;
-    buf.write(&(user_data as u64).to_le_bytes())?;
-    let ori_func_addr_off = buf.stream_position().unwrap() + 2;
-    // mov rdx, ori_func
-    // mov rcx, rsp
-    // sub rsp,0x20
-    // mov rax, cb
-    buf.write(&[
-        0x48, 0xba, 0, 0, 0, 0, 0, 0, 0, 0, 0x48, 0x89, 0xe1, 0x48, 0x83, 0xec, 0x20, 0x48, 0xb8,
-    ])?;
-    buf.write(&(cb as usize as u64).to_le_bytes())?;
-    // call rax
-    // add rsp, 0x20
-    buf.write(&[0xff, 0xd0, 0x48, 0x83, 0xc4, 0x20])?;
-    write_trampoline_epilog1(buf)?;
-    write_trampoline_epilog2_jmp_ret(buf)?;
-
-    let ori_func_off = buf.stream_position().unwrap();
-    buf.write(&move_code_to_addr(
-        moving_code,
-        trampoline_base_addr + ori_func_off,
-    )?)?;
-    jmp_addr(ori_addr as u64 + u64::from(ori_len), buf)?;
-
-    write_ori_func_addr(buf, ori_func_addr_off, trampoline_base_addr + ori_func_off);
-
-    Ok(())
-}
-
-fn generate_trampoline(
-    hooker: &Hooker,
-    moving_code: Vec<Instruction>,
-    ori_len: u8,
-    user_data: usize,
-) -> Result<Box<[u8; TRAMPOLINE_MAX_LEN]>, HookError> {
-    let mut trampoline_buffer = Box::new([0u8; TRAMPOLINE_MAX_LEN]);
-    let trampoline_addr = trampoline_buffer.as_ptr() as u64;
-    let mut buf = Cursor::new(&mut trampoline_buffer[..]);
-
-    write_trampoline_prolog(&mut buf)?;
-
-    match hooker.hook_type {
-        HookType::JmpBack(cb) => generate_jmp_back_trampoline(
-            &mut buf,
-            trampoline_addr,
-            &moving_code,
-            hooker.addr,
-            cb,
-            ori_len,
-            user_data,
-        ),
-        HookType::Retn(cb) => generate_retn_trampoline(
-            &mut buf,
-            trampoline_addr,
-            &moving_code,
-            hooker.addr,
-            cb,
-            ori_len,
-            user_data,
-        ),
-        HookType::JmpToAddr(dest_addr, cb) => generate_jmp_addr_trampoline(
-            &mut buf,
-            trampoline_addr,
-            &moving_code,
-            hooker.addr,
-            dest_addr,
-            cb,
-            ori_len,
-            user_data,
-        ),
-        HookType::JmpToRet(cb) => generate_jmp_ret_trampoline(
-            &mut buf,
-            trampoline_addr,
-            &moving_code,
-            hooker.addr,
-            cb,
-            ori_len,
-            user_data,
-        ),
-    }?;
-
-    Ok(trampoline_buffer)
-}
-
-fn modify_jmp(dest_addr: usize, trampoline_addr: usize) {
-    let buf = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, 14) };
-    let distance = trampoline_addr as i64 - (dest_addr as i64 + 5);
-    if distance.abs() <= 0x7fff_ffff {
-        // jmp xxx
-        buf[0] = 0xe9;
-        buf[1..5].copy_from_slice(&(distance as i32).to_le_bytes());
-    } else {
-        // jmp qword ptr [rip+0]
-        buf[0..6].copy_from_slice(&[0xff, 0x25, 0, 0, 0, 0]);
-        buf[6..14].copy_from_slice(&(trampoline_addr as u64).to_le_bytes());
-    }
-}
-
-fn modify_jmp_with_thread_cb(hook: &Hooker, trampoline_addr: usize) -> Result<(), HookError> {
-    if let CallbackOption::Some(cbs) = &hook.thread_cb {
-        if !cbs.pre() {
-            return Err(HookError::PreHook);
+fn modify_jmp(dest_addr: usize, trampoline_addr: usize, jmp_type: &JmpType) {
+    match jmp_type {
+        JmpType::RipRelative => {
+            let buf = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, 14) };
+            // jmp qword ptr [rip+0]
+            buf[0..6].copy_from_slice(&[0xff, 0x25, 0, 0, 0, 0]);
+            buf[6..14].copy_from_slice(&(trampoline_addr as u64).to_le_bytes());
         }
-        modify_jmp(hook.addr, trampoline_addr);
-        cbs.post();
-        Ok(())
-    } else {
-        modify_jmp(hook.addr, trampoline_addr);
-        Ok(())
+        JmpType::Direct(_, _) => {
+            let buf = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, 5) };
+            let distance = trampoline_addr as i64 - (dest_addr as i64 + 5);
+            // jmp xxx
+            buf[0] = 0xe9;
+            buf[1..5].copy_from_slice(&(distance as i32).to_le_bytes());
+        }
+        JmpType::DirectWithRipRelative(second_jmp_addr) => {
+            let jmp1_buf = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, 5) };
+            let distance = *second_jmp_addr as i64 - (dest_addr as i64 + 5);
+            // jmp xxx
+            jmp1_buf[0] = 0xe9;
+            jmp1_buf[1..5].copy_from_slice(&(distance as i32).to_le_bytes());
+
+            let jmp2_buf = unsafe { slice::from_raw_parts_mut(*second_jmp_addr as *mut u8, 14) };
+            // jmp qword ptr [rip+0]
+            jmp2_buf[0..6].copy_from_slice(&[0xff, 0x25, 0, 0, 0, 0]);
+            jmp2_buf[6..14].copy_from_slice(&(trampoline_addr as u64).to_le_bytes());
+        }
     }
 }
 
@@ -714,17 +400,4 @@ fn recover_jmp(dest_addr: usize, origin: &[u8]) {
     let buf = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, origin.len()) };
     // jmp trampoline_addr
     buf.copy_from_slice(origin);
-}
-
-fn recover_jmp_with_thread_cb(hook: &HookPoint) -> Result<(), HookError> {
-    if let CallbackOption::Some(cbs) = &hook.thread_cb {
-        if !cbs.pre() {
-            return Err(HookError::PreHook);
-        }
-        recover_jmp(hook.addr, &hook.origin);
-        cbs.post();
-    } else {
-        recover_jmp(hook.addr, &hook.origin);
-    }
-    Ok(())
 }

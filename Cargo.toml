@@ -13,6 +13,7 @@ categories = ["hardware-support"]
 [dependencies]
 iced-x86 = { version = "1.20", default-features = false, features = ["std", "decoder", "block_encoder", "instr_info"] }
 thiserror = "1.0"
+bitflags = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
