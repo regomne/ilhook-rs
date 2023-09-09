@@ -129,14 +129,14 @@ impl<'a> Trampoline<'a> {
 
 impl<'a> Drop for Trampoline<'a> {
     fn drop(&mut self) {
-        /*let buffer = self.buffer.get_mut();
+        let buffer = self.buffer.get_mut();
         self.trampoline_prot.map(|prot| {
             self.code_protect_cb.as_ref().unwrap().recover_protect(
                 buffer.as_ptr() as usize,
                 buffer.len(),
                 prot,
             )
-        });*/
+        });
     }
 }
 

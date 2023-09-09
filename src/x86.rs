@@ -1,8 +1,7 @@
-use bitflags::bitflags;
-use iced_x86::{
-    BlockEncoder, BlockEncoderOptions, Decoder, DecoderOptions, Instruction, InstructionBlock,
-};
-use std::io::{Cursor, Seek, SeekFrom, Write};
+mod trampoline;
+
+use iced_x86::{Decoder, DecoderOptions, Instruction};
+
 use std::slice;
 
 #[cfg(windows)]
@@ -15,7 +14,10 @@ use windows_sys::Win32::System::Memory::VirtualProtect;
 #[cfg(unix)]
 use libc::{__errno_location, c_void, mprotect, sysconf};
 
+use crate::callbacks::*;
 use crate::err::HookError;
+use crate::utils::{MemoryProtectGuard, ThreadSuspendingGuard};
+use trampoline::Trampoline;
 
 const MAX_INST_LEN: usize = 15;
 const JMP_INST_SIZE: usize = 5;
@@ -54,7 +56,7 @@ pub type RetnRoutine =
 /// * `ori_func_ptr` - The original function pointer. Call this after converting it to the original function type.
 /// * `user_data` - User data that was previously passed to [`Hooker::new`].
 pub type JmpToAddrRoutine =
-    unsafe extern "cdecl" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize);
+    unsafe extern "cdecl" fn(regs: *mut Registers, ori_func_ptr: usize, user_data: usize);
 
 /// This is the routine used in a `jmp-ret hook`, which means the EIP will jump to the return
 /// value of the routine.
@@ -69,7 +71,7 @@ pub type JmpToAddrRoutine =
 ///
 /// Returns the address you want to jump to.
 pub type JmpToRetRoutine =
-    unsafe extern "cdecl" fn(regs: *mut Registers, ori_func_ptr: usize, src_addr: usize) -> usize;
+    unsafe extern "cdecl" fn(regs: *mut Registers, ori_func_ptr: usize, user_data: usize) -> usize;
 
 /// The hooking type.
 pub enum HookType {
@@ -127,39 +129,19 @@ impl Registers {
     }
 }
 
-/// The trait which is called before and after the modifying of the `jmp` instruction.
-/// Usually is used to suspend and resume all other threads, to avoid instruction colliding.
-pub trait ThreadCallback {
-    /// the callback before modifying `jmp` instruction, should return true if success.
-    fn pre(&self) -> bool;
-    /// the callback after modifying `jmp` instruction
-    fn post(&self);
-}
-
-/// Option for thread callback
-pub enum CallbackOption {
-    /// Valid callback
-    Some(Box<dyn ThreadCallback>),
-    /// No callback
-    None,
-}
-
-bitflags! {
-    /// Hook flags
-    pub struct HookFlags:u32 {
-        /// If set, will not modify the memory protection of the destination address
-        const NOT_MODIFY_MEMORY_PROTECT = 0x1;
-    }
-}
-
 /// The entry struct in ilhook.
 /// Please read the main doc to view usage.
-pub struct Hooker {
+pub struct Hooker<'a> {
     addr: usize,
     hook_type: HookType,
-    thread_cb: CallbackOption,
-    flags: HookFlags,
+    options: HookOptions<'a>,
     user_data: usize,
+}
+
+/// Hook options
+pub struct HookOptions<'a> {
+    pub thread_operating_cb: Option<&'a dyn ThreadOperatingCallback>,
+    pub code_protect_cb: Option<&'a dyn CodeProtectModifyingCallback>,
 }
 
 /// The hook result returned by `Hooker::hook`.
@@ -168,8 +150,6 @@ pub struct HookPoint {
     trampoline: Box<[u8; 100]>,
     trampoline_prot: u32,
     origin: Vec<u8>,
-    thread_cb: CallbackOption,
-    flags: HookFlags,
 }
 
 #[cfg(not(target_arch = "x86"))]
@@ -179,7 +159,7 @@ fn env_lock() {
 #[cfg(target_arch = "x86")]
 fn env_lock() {}
 
-impl Hooker {
+impl<'a> Hooker<'a> {
     /// Create a new Hooker.
     ///
     /// # Parameters
@@ -192,17 +172,15 @@ impl Hooker {
     pub fn new(
         addr: usize,
         hook_type: HookType,
-        thread_cb: CallbackOption,
+        options: HookOptions<'a>,
         user_data: usize,
-        flags: HookFlags,
     ) -> Self {
         env_lock();
         Self {
             addr,
             hook_type,
-            thread_cb,
             user_data,
-            flags,
+            options,
         }
     }
 
@@ -219,9 +197,19 @@ impl Hooker {
     /// 5. hook or unhook from 2 or more threads at the same time without `HookFlags::NOT_MODIFY_MEMORY_PROTECT`. Because of memory protection colliding.
     /// 6. Other unpredictable errors.
     pub unsafe fn hook(self) -> Result<HookPoint, HookError> {
+        self.hook_internal()
+    }
+
+    fn hook_internal(self) -> Result<HookPoint, HookError> {
         let (moving_insts, origin) = get_moving_insts(self.addr)?;
-        let trampoline =
-            generate_trampoline(&self, moving_insts, origin.len() as u8, self.user_data)?;
+        let mut trampoline = Trampoline::new(&self.options.code_protect_cb);
+        trampoline.generate(
+            self.addr,
+            self.hook_type,
+            &moving_insts,
+            origin.len() as u8,
+            self.user_data,
+        )?;
         let trampoline_prot = modify_mem_protect(trampoline.as_ptr() as usize, trampoline.len())?;
         if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
             let old_prot = modify_mem_protect(self.addr, JMP_INST_SIZE)?;
@@ -349,276 +337,6 @@ fn recover_mem_protect(addr: usize, _: usize, old: u32) {
             old as i32,
         )
     };
-}
-
-fn write_relative_off<T: Write + Seek>(
-    buf: &mut T,
-    base_addr: u32,
-    dst_addr: u32,
-) -> Result<(), HookError> {
-    let dst_addr = dst_addr as i32;
-    let cur_pos = buf.stream_position().unwrap() as i32;
-    let call_off = dst_addr - (base_addr as i32 + cur_pos + 4);
-    buf.write(&call_off.to_le_bytes())?;
-    Ok(())
-}
-
-fn move_code_to_addr(ori_insts: &Vec<Instruction>, dest_addr: u32) -> Result<Vec<u8>, HookError> {
-    let block = InstructionBlock::new(ori_insts, u64::from(dest_addr));
-    let encoded = BlockEncoder::encode(32, block, BlockEncoderOptions::NONE)
-        .map_err(|_| HookError::MoveCode)?;
-    Ok(encoded.code_buffer)
-}
-
-fn write_ori_func_addr<T: Write + Seek>(buf: &mut T, ori_func_addr_off: u32, ori_func_off: u32) {
-    let pos = buf.stream_position().unwrap();
-    buf.seek(SeekFrom::Start(u64::from(ori_func_addr_off)))
-        .unwrap();
-    buf.write(&ori_func_off.to_le_bytes()).unwrap();
-    buf.seek(SeekFrom::Start(pos)).unwrap();
-}
-
-fn generate_jmp_back_trampoline<T: Write + Seek>(
-    buf: &mut T,
-    trampoline_base_addr: u32,
-    moving_code: &Vec<Instruction>,
-    ori_addr: u32,
-    cb: JmpBackRoutine,
-    ori_len: u8,
-    user_data: usize,
-) -> Result<(), HookError> {
-    // push user_data
-    buf.write(&[0x68])?;
-    buf.write(&user_data.to_le_bytes())?;
-
-    // push ebp (Registers)
-    // call XXXX (dest addr)
-    buf.write(&[0x55, 0xe8])?;
-    write_relative_off(buf, trampoline_base_addr, cb as u32)?;
-
-    // add esp, 0x8
-    buf.write(&[0x83, 0xc4, 0x08])?;
-    // popfd
-    // popad
-    buf.write(&[0x9d, 0x61])?;
-
-    let cur_pos = buf.stream_position().unwrap() as u32;
-    buf.write(&move_code_to_addr(
-        moving_code,
-        trampoline_base_addr + cur_pos,
-    )?)?;
-    // jmp back
-    buf.write(&[0xe9])?;
-    write_relative_off(buf, trampoline_base_addr, ori_addr + u32::from(ori_len))
-}
-
-fn generate_retn_trampoline<T: Write + Seek>(
-    buf: &mut T,
-    trampoline_base_addr: u32,
-    moving_code: &Vec<Instruction>,
-    ori_addr: u32,
-    retn_val: u16,
-    cb: RetnRoutine,
-    ori_len: u8,
-    user_data: usize,
-) -> Result<(), HookError> {
-    // push user_data
-    buf.write(&[0x68])?;
-    buf.write(&user_data.to_le_bytes())?;
-
-    // push XXXX (original function addr)
-    // push ebp (Registers)
-    // call XXXX (dest addr)
-    let ori_func_addr_off = buf.stream_position().unwrap() + 1;
-    buf.write(&[0x68, 0, 0, 0, 0, 0x55, 0xe8])?;
-    write_relative_off(buf, trampoline_base_addr, cb as u32)?;
-
-    // add esp, 0xc
-    buf.write(&[0x83, 0xc4, 0x0c])?;
-    // mov [esp+20h], eax
-    buf.write(&[0x89, 0x44, 0x24, 0x20])?;
-    // popfd
-    // popad
-    buf.write(&[0x9d, 0x61])?;
-    if retn_val == 0 {
-        // retn
-        buf.write(&[0xc3])?;
-    } else {
-        // retn XX
-        buf.write(&[0xc2])?;
-        buf.write(&retn_val.to_le_bytes())?;
-    }
-    let ori_func_off = buf.stream_position().unwrap() as u32;
-    write_ori_func_addr(
-        buf,
-        ori_func_addr_off as u32,
-        trampoline_base_addr + ori_func_off,
-    );
-
-    let cur_pos = buf.stream_position().unwrap() as u32;
-    buf.write(&move_code_to_addr(
-        moving_code,
-        trampoline_base_addr + cur_pos,
-    )?)?;
-
-    // jmp ori_addr
-    buf.write(&[0xe9])?;
-    write_relative_off(buf, trampoline_base_addr, ori_addr + u32::from(ori_len))
-}
-
-fn generate_jmp_addr_trampoline<T: Write + Seek>(
-    buf: &mut T,
-    trampoline_base_addr: u32,
-    moving_code: &Vec<Instruction>,
-    ori_addr: u32,
-    dest_addr: u32,
-    cb: JmpToAddrRoutine,
-    ori_len: u8,
-    user_data: usize,
-) -> Result<(), HookError> {
-    // push user_data
-    buf.write(&[0x68])?;
-    buf.write(&user_data.to_le_bytes())?;
-
-    // push XXXX (original function addr)
-    // push ebp (Registers)
-    // call XXXX (dest addr)
-    let ori_func_addr_off = buf.stream_position().unwrap() + 1;
-    buf.write(&[0x68, 0, 0, 0, 0, 0x55, 0xe8])?;
-    write_relative_off(buf, trampoline_base_addr, cb as u32)?;
-
-    // add esp, 0xc
-    buf.write(&[0x83, 0xc4, 0x0c])?;
-    // popfd
-    // popad
-    buf.write(&[0x9d, 0x61])?;
-    // jmp back
-    buf.write(&[0xe9])?;
-    write_relative_off(buf, trampoline_base_addr, dest_addr + u32::from(ori_len))?;
-
-    let ori_func_off = buf.stream_position().unwrap() as u32;
-    write_ori_func_addr(
-        buf,
-        ori_func_addr_off as u32,
-        trampoline_base_addr + ori_func_off,
-    );
-
-    let cur_pos = buf.stream_position().unwrap() as u32;
-    buf.write(&move_code_to_addr(
-        moving_code,
-        trampoline_base_addr + cur_pos,
-    )?)?;
-
-    // jmp ori_addr
-    buf.write(&[0xe9])?;
-    write_relative_off(buf, trampoline_base_addr, ori_addr + u32::from(ori_len))
-}
-
-fn generate_jmp_ret_trampoline<T: Write + Seek>(
-    buf: &mut T,
-    trampoline_base_addr: u32,
-    moving_code: &Vec<Instruction>,
-    ori_addr: u32,
-    cb: JmpToRetRoutine,
-    ori_len: u8,
-    user_data: usize,
-) -> Result<(), HookError> {
-    // push user_data
-    buf.write(&[0x68])?;
-    buf.write(&user_data.to_le_bytes())?;
-
-    // push XXXX (original function addr)
-    // push ebp (Registers)
-    // call XXXX (dest addr)
-    let ori_func_addr_off = buf.stream_position().unwrap() + 1;
-    buf.write(&[0x68, 0, 0, 0, 0, 0x55, 0xe8])?;
-    write_relative_off(buf, trampoline_base_addr, cb as u32)?;
-
-    // add esp, 0xc
-    buf.write(&[0x83, 0xc4, 0x0c])?;
-    // mov [esp-4], eax
-    buf.write(&[0x89, 0x44, 0x24, 0xfc])?;
-    // popfd
-    // popad
-    buf.write(&[0x9d, 0x61])?;
-    // jmp dword ptr [esp-0x28]
-    buf.write(&[0xff, 0x64, 0x24, 0xd8])?;
-
-    let ori_func_off = buf.stream_position().unwrap() as u32;
-    write_ori_func_addr(
-        buf,
-        ori_func_addr_off as u32,
-        trampoline_base_addr + ori_func_off,
-    );
-
-    let cur_pos = buf.stream_position().unwrap() as u32;
-    buf.write(&move_code_to_addr(
-        moving_code,
-        trampoline_base_addr + cur_pos,
-    )?)?;
-
-    // jmp ori_addr
-    buf.write(&[0xe9])?;
-    write_relative_off(buf, trampoline_base_addr, ori_addr + u32::from(ori_len))
-}
-
-fn generate_trampoline(
-    hooker: &Hooker,
-    moving_code: Vec<Instruction>,
-    ori_len: u8,
-    user_data: usize,
-) -> Result<Box<[u8; 100]>, HookError> {
-    let mut raw_buffer = Box::new([0u8; 100]);
-    let trampoline_addr = raw_buffer.as_ptr() as u32;
-    let mut buf = Cursor::new(&mut raw_buffer[..]);
-
-    // pushad
-    // pushfd
-    // mov ebp, esp
-    buf.write(&[0x60, 0x9c, 0x8b, 0xec])?;
-
-    match hooker.hook_type {
-        HookType::JmpBack(cb) => generate_jmp_back_trampoline(
-            &mut buf,
-            trampoline_addr,
-            &moving_code,
-            hooker.addr as u32,
-            cb,
-            ori_len,
-            user_data,
-        ),
-        HookType::Retn(val, cb) => generate_retn_trampoline(
-            &mut buf,
-            trampoline_addr,
-            &moving_code,
-            hooker.addr as u32,
-            val as u16,
-            cb,
-            ori_len,
-            user_data,
-        ),
-        HookType::JmpToAddr(dest, cb) => generate_jmp_addr_trampoline(
-            &mut buf,
-            trampoline_addr,
-            &moving_code,
-            hooker.addr as u32,
-            dest as u32,
-            cb,
-            ori_len,
-            user_data,
-        ),
-        HookType::JmpToRet(cb) => generate_jmp_ret_trampoline(
-            &mut buf,
-            trampoline_addr,
-            &moving_code,
-            hooker.addr as u32,
-            cb,
-            ori_len,
-            user_data,
-        ),
-    }?;
-
-    Ok(raw_buffer)
 }
 
 fn modify_jmp(dest_addr: usize, trampoline_addr: usize) -> Result<(), HookError> {

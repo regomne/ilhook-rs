@@ -3,8 +3,6 @@ mod move_inst;
 mod tests;
 mod trampoline;
 
-use std::cell::RefCell;
-use std::rc::Rc;
 use std::slice;
 
 use iced_x86::{Decoder, DecoderOptions, Instruction};
@@ -273,7 +271,6 @@ impl<'a> Hooker<'a> {
             }
             _ => Trampoline::new(&self.options.code_protect_cb),
         };
-        let trampoline_addr = trampoline.get_addr();
         trampoline.generate(
             self.addr,
             self.hook_type,
@@ -285,7 +282,11 @@ impl<'a> Hooker<'a> {
         MemoryProtectGuard::new(&self.options.code_protect_cb, self.addr, jmp_inst_size).run(
             || {
                 ThreadSuspendingGuard::new(&self.options.thread_operating_cb).run(|| {
-                    modify_jmp(self.addr, trampoline_addr, &self.options.first_jmp_type);
+                    modify_jmp(
+                        self.addr,
+                        trampoline.get_addr(),
+                        &self.options.first_jmp_type,
+                    );
                     Ok(())
                 })
             },
