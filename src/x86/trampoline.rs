@@ -23,6 +23,10 @@ impl<'a> Trampoline<'a> {
         }
     }
 
+    pub fn get_addr(&self)->usize{
+        self.buffer.as_ptr() as usize
+    }
+
     pub fn generate(
         &mut self,
         addr: usize,
@@ -79,6 +83,12 @@ impl<'a> Trampoline<'a> {
                 user_data,
             ),
         }?;
+
+        self.trampoline_prot = self
+            .code_protect_cb
+            .as_ref()
+            .map(|cb| cb.set_protect_to_rwe(trampoline_addr as usize, self.buffer.len()))
+            .map_or(Ok(None), |v| v.map(Some).map_err(HookError::MemoryProtect))?;
 
         Ok(())
     }

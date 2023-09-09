@@ -1,18 +1,10 @@
 mod trampoline;
+#[cfg(target_arch = "x86")]
+mod tests;
 
 use iced_x86::{Decoder, DecoderOptions, Instruction};
 
 use std::slice;
-
-#[cfg(windows)]
-use core::ffi::c_void;
-#[cfg(windows)]
-use windows_sys::Win32::Foundation::GetLastError;
-#[cfg(windows)]
-use windows_sys::Win32::System::Memory::VirtualProtect;
-
-#[cfg(unix)]
-use libc::{__errno_location, c_void, mprotect, sysconf};
 
 use crate::callbacks::*;
 use crate::err::HookError;
@@ -144,12 +136,23 @@ pub struct HookOptions<'a> {
     pub code_protect_cb: Option<&'a dyn CodeProtectModifyingCallback>,
 }
 
+impl<'a> Default for HookOptions<'a> {
+    fn default() -> Self {
+        HookOptions {
+            thread_operating_cb: None,
+            code_protect_cb: Some(&DEFAULT_CODE_PROTECT_MODIFYING_CALLBACK),
+        }
+    }
+}
+
 /// The hook result returned by `Hooker::hook`.
-pub struct HookPoint {
+pub struct HookPoint<'a> {
     addr: usize,
-    trampoline: Box<[u8; 100]>,
-    trampoline_prot: u32,
+    #[allow(dead_code)]
+    trampoline: Trampoline<'a>,
     origin: Vec<u8>,
+    thread_operating_cb: Option<&'a dyn ThreadOperatingCallback>,
+    code_protect_cb: Option<&'a dyn CodeProtectModifyingCallback>,
 }
 
 #[cfg(not(target_arch = "x86"))]
@@ -196,11 +199,11 @@ impl<'a> Hooker<'a> {
     /// 4. Set `NOT_MODIFY_MEMORY_PROTECT` where it should not be set.
     /// 5. hook or unhook from 2 or more threads at the same time without `HookFlags::NOT_MODIFY_MEMORY_PROTECT`. Because of memory protection colliding.
     /// 6. Other unpredictable errors.
-    pub unsafe fn hook(self) -> Result<HookPoint, HookError> {
+    pub unsafe fn hook(self) -> Result<HookPoint<'a>, HookError> {
         self.hook_internal()
     }
 
-    fn hook_internal(self) -> Result<HookPoint, HookError> {
+    fn hook_internal(self) -> Result<HookPoint<'a>, HookError> {
         let (moving_insts, origin) = get_moving_insts(self.addr)?;
         let mut trampoline = Trampoline::new(&self.options.code_protect_cb);
         trampoline.generate(
@@ -210,54 +213,41 @@ impl<'a> Hooker<'a> {
             origin.len() as u8,
             self.user_data,
         )?;
-        let trampoline_prot = modify_mem_protect(trampoline.as_ptr() as usize, trampoline.len())?;
-        if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
-            let old_prot = modify_mem_protect(self.addr, JMP_INST_SIZE)?;
-            let ret = modify_jmp_with_thread_cb(&self, trampoline.as_ptr() as usize);
-            recover_mem_protect(self.addr, JMP_INST_SIZE, old_prot);
-            ret?;
-        } else {
-            modify_jmp_with_thread_cb(&self, trampoline.as_ptr() as usize)?;
-        }
+        MemoryProtectGuard::new(&self.options.code_protect_cb, self.addr, JMP_INST_SIZE).run(||{
+            ThreadSuspendingGuard::new(&self.options.thread_operating_cb).run(||{
+                modify_jmp(self.addr, trampoline.get_addr())
+            })
+        })?;
         Ok(HookPoint {
             addr: self.addr,
             trampoline,
-            trampoline_prot,
             origin,
-            thread_cb: self.thread_cb,
-            flags: self.flags,
+            thread_operating_cb: self.options.thread_operating_cb,
+            code_protect_cb: self.options.code_protect_cb,
         })
     }
 }
 
-impl HookPoint {
+impl<'a> HookPoint<'a> {
     /// Consume self and unhook the address.
     pub unsafe fn unhook(self) -> Result<(), HookError> {
-        self.unhook_by_ref()
+        self.unhook_internal()
     }
 
-    fn unhook_by_ref(&self) -> Result<(), HookError> {
-        let ret: Result<(), HookError>;
-        if !self.flags.contains(HookFlags::NOT_MODIFY_MEMORY_PROTECT) {
-            let old_prot = modify_mem_protect(self.addr, JMP_INST_SIZE)?;
-            ret = recover_jmp_with_thread_cb(self);
-            recover_mem_protect(self.addr, JMP_INST_SIZE, old_prot);
-        } else {
-            ret = recover_jmp_with_thread_cb(self)
-        }
-        recover_mem_protect(
-            self.trampoline.as_ptr() as usize,
-            self.trampoline.len(),
-            self.trampoline_prot,
-        );
-        ret
+    fn unhook_internal(&self) -> Result<(), HookError> {
+        MemoryProtectGuard::new(&self.code_protect_cb, self.addr, JMP_INST_SIZE).run(|| {
+            ThreadSuspendingGuard::new(&self.thread_operating_cb).run(|| {
+                recover_jmp(self.addr, &self.origin[0..JMP_INST_SIZE]);
+                Ok(())
+            })
+        })
     }
 }
 
 // When the HookPoint drops, it should unhook automatically.
-impl Drop for HookPoint {
+impl<'a> Drop for HookPoint<'a> {
     fn drop(&mut self) {
-        self.unhook_by_ref().unwrap_or_default();
+        self.unhook_internal().unwrap_or_default();
     }
 }
 
@@ -283,62 +273,6 @@ fn get_moving_insts(addr: usize) -> Result<(Vec<Instruction>, Vec<u8>), HookErro
     Ok((ori_insts, code_slice[0..decoder.position()].into()))
 }
 
-#[cfg(windows)]
-fn modify_mem_protect(addr: usize, len: usize) -> Result<u32, HookError> {
-    let mut old_prot: u32 = 0;
-    let old_prot_ptr = std::ptr::addr_of_mut!(old_prot);
-    // PAGE_EXECUTE_READWRITE = 0x40
-    let ret = unsafe { VirtualProtect(addr as *const c_void, len, 0x40, old_prot_ptr) };
-    if ret == 0 {
-        Err(HookError::MemoryProtect(unsafe { GetLastError() }))
-    } else {
-        Ok(old_prot)
-    }
-}
-
-#[cfg(unix)]
-fn modify_mem_protect(addr: usize, len: usize) -> Result<u32, HookError> {
-    let page_size = unsafe { sysconf(30) }; //_SC_PAGESIZE == 30
-    if len > page_size.try_into().unwrap() {
-        Err(HookError::InvalidParameter)
-    } else {
-        //(PROT_READ | PROT_WRITE | PROT_EXEC) == 7
-        let ret = unsafe {
-            mprotect(
-                (addr & !(page_size as usize - 1)) as *mut c_void,
-                page_size as usize,
-                7,
-            )
-        };
-        if ret != 0 {
-            let err = unsafe { *(__errno_location()) };
-            Err(HookError::MemoryProtect(err as u32))
-        } else {
-            // it's too complex to get the original memory protection
-            Ok(7)
-        }
-    }
-}
-
-#[cfg(windows)]
-fn recover_mem_protect(addr: usize, len: usize, old: u32) {
-    let mut old_prot: u32 = 0;
-    let old_prot_ptr = std::ptr::addr_of_mut!(old_prot);
-    unsafe { VirtualProtect(addr as *const c_void, len, old, old_prot_ptr) };
-}
-
-#[cfg(unix)]
-fn recover_mem_protect(addr: usize, _: usize, old: u32) {
-    let page_size = unsafe { sysconf(30) }; //_SC_PAGESIZE == 30
-    unsafe {
-        mprotect(
-            (addr & !(page_size as usize - 1)) as *mut c_void,
-            page_size as usize,
-            old as i32,
-        )
-    };
-}
-
 fn modify_jmp(dest_addr: usize, trampoline_addr: usize) -> Result<(), HookError> {
     let buf = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, JMP_INST_SIZE) };
     // jmp trampoline_addr
@@ -348,103 +282,8 @@ fn modify_jmp(dest_addr: usize, trampoline_addr: usize) -> Result<(), HookError>
     Ok(())
 }
 
-fn modify_jmp_with_thread_cb(hook: &Hooker, trampoline_addr: usize) -> Result<(), HookError> {
-    if let CallbackOption::Some(cbs) = &hook.thread_cb {
-        if !cbs.pre() {
-            return Err(HookError::PreHook);
-        }
-        let ret = modify_jmp(hook.addr, trampoline_addr);
-        cbs.post();
-        ret
-    } else {
-        modify_jmp(hook.addr, trampoline_addr)
-    }
-}
-
 fn recover_jmp(dest_addr: usize, origin: &[u8]) {
     let buf = unsafe { slice::from_raw_parts_mut(dest_addr as *mut u8, origin.len()) };
     // jmp trampoline_addr
     buf.copy_from_slice(origin);
-}
-
-fn recover_jmp_with_thread_cb(hook: &HookPoint) -> Result<(), HookError> {
-    if let CallbackOption::Some(cbs) = &hook.thread_cb {
-        if !cbs.pre() {
-            return Err(HookError::PreHook);
-        }
-        recover_jmp(hook.addr, &hook.origin);
-        cbs.post();
-    } else {
-        recover_jmp(hook.addr, &hook.origin);
-    }
-    Ok(())
-}
-
-#[cfg(target_arch = "x86")]
-mod tests {
-    #[allow(unused_imports)]
-    use super::*;
-
-    #[cfg(test)]
-    #[inline(never)]
-    fn foo(x: u32) -> u32 {
-        println!("original foo, x:{}", x);
-        x * x
-    }
-    #[cfg(test)]
-    unsafe extern "cdecl" fn on_foo(
-        reg: *mut Registers,
-        old_func: usize,
-        user_data: usize,
-    ) -> usize {
-        let old_func = std::mem::transmute::<usize, fn(u32) -> u32>(old_func);
-        old_func((*reg).get_arg(1)) as usize + user_data
-    }
-
-    #[test]
-    fn test_hook_function_cdecl() {
-        assert_eq!(foo(5), 25);
-        let hooker = Hooker::new(
-            foo as usize,
-            HookType::Retn(0, on_foo),
-            CallbackOption::None,
-            100,
-            HookFlags::empty(),
-        );
-        let info = unsafe { hooker.hook().unwrap() };
-        assert_eq!(foo(5), 125);
-        unsafe { info.unhook().unwrap() };
-        assert_eq!(foo(5), 25);
-    }
-
-    #[cfg(test)]
-    #[inline(never)]
-    extern "stdcall" fn foo2(x: u32) -> u32 {
-        println!("original foo, x:{}", x);
-        x * x
-    }
-    #[cfg(test)]
-    unsafe extern "cdecl" fn on_foo2(
-        reg: *mut Registers,
-        old_func: usize,
-        user_data: usize,
-    ) -> usize {
-        let old_func = std::mem::transmute::<usize, extern "stdcall" fn(u32) -> u32>(old_func);
-        old_func((*reg).get_arg(1)) as usize + user_data
-    }
-    #[test]
-    fn test_hook_function_stdcall() {
-        assert_eq!(foo2(5), 25);
-        let hooker = Hooker::new(
-            foo2 as usize,
-            HookType::Retn(4, on_foo2),
-            CallbackOption::None,
-            100,
-            HookFlags::empty(),
-        );
-        let info = unsafe { hooker.hook().unwrap() };
-        assert_eq!(foo2(5), 125);
-        unsafe { info.unhook().unwrap() };
-        assert_eq!(foo2(5), 25);
-    }
 }

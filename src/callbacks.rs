@@ -1,7 +1,9 @@
+use std::io;
+
 #[cfg(windows)]
 use core::ffi::c_void;
 #[cfg(unix)]
-use libc::{__errno_location, c_void, mprotect, sysconf};
+use libc::{c_void, mprotect, sysconf};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::GetLastError;
 #[cfg(windows)]
@@ -63,7 +65,7 @@ fn modify_mem_protect_to_rwe(addr: usize, len: usize) -> Result<u64, u32> {
             )
         };
         if ret != 0 {
-            let err = unsafe { *(__errno_location()) };
+            let err = io::Error::last_os_error().raw_os_error().unwrap_or(0);
             Err(err as u32)
         } else {
             // it's too complex to get the original memory protection

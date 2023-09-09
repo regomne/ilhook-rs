@@ -109,6 +109,7 @@ unsafe extern "win64" fn new_foo(reg:*mut Registers, _:usize, _:usize)->usize{
 
 # #[cfg(target_arch = "x86_64")]
 let hooker=Hooker::new(foo as usize, HookType::Retn(new_foo), HookOptions::default(), 0);
+# #[cfg(target_arch = "x86_64")]
 unsafe{hooker.hook().unwrap()};
 //assert_eq!(foo(5), 28); //commented as hooking is not supported in doc tests
 ```

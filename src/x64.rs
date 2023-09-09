@@ -206,6 +206,7 @@ impl<'a> Default for HookOptions<'a> {
 /// The hook result returned by `Hooker::hook`.
 pub struct HookPoint<'a> {
     addr: usize,
+    #[allow(dead_code)]
     trampoline: Trampoline<'a>,
     origin: Vec<u8>,
     jmp_inst_size: usize,
