@@ -1,5 +1,5 @@
 name: test-on-push
-run-name: Test of "${{ github.event.commit_comment }}" by ${{ github.author }}
+run-name: Test of "${{ github.event.head_commit.message }}" by @${{ github.actor }}
 
 on:
   push:
@@ -20,6 +20,7 @@ jobs:
       run: cargo build -r --verbose
     - name: Run tests
       run: cargo test -r --verbose -- --test-threads=1
+      
   win-64-test:
     runs-on: windows-latest
 
