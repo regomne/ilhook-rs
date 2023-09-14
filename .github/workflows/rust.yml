@@ -1,11 +1,11 @@
-name: test-on-push
-run-name: Test of "${{ github.event.head_commit.message }}" by @${{ github.actor }}
+name: Test
 
 on:
   push:
     branches: [ "master" ]
   pull_request:
     branches: [ "master" ]
+  workflow_dispatch:
 
 env:
   CARGO_TERM_COLOR: always
