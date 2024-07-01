@@ -18,6 +18,17 @@ like so:
 ilhook = "2"
 ```
 
+# Features
+
+1. :computer: Support for x86 and x64 hooks.
+2. :wrench: Multiple hooking methods, including:
+   1. Hooking with a return to the original location after execution.
+   2. Hooking with a replacement function (i.e., executing the original function as needed within the hook code and directly returning).
+   3. Hooking with a jump to any specified address after execution.
+3. :rocket: 64-bit hooks support long jumps, eliminating the need to allocate trampolines within +/- 2GB range.
+4. :arrow_right: 64-bit hooks support 5-byte jumps, but require manual specification of nearby trampoline addresses or the address of the second jmp.
+5. :gear: Customizable memory protection attribute modification callbacks and thread suspension/resumption callbacks.
+
 # Hook Types
 
 Ilhook supports 4 types of hooking.

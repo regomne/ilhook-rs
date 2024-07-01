@@ -44,10 +44,6 @@ pub enum HookError {
     #[error("suspending thread failed")]
     ThreadSuspending(u32),
 
-    /// pre hook
-    #[error("pre hook")]
-    PreHook,
-
     /// Some io error
     #[error("io error")]
     Io(#[from] io::Error),

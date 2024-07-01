@@ -94,7 +94,8 @@ pub enum JmpType {
     /// Use 2 jmp instructions to jump. First of it uses only 5 bytes,
     /// You need to look for and specify a code address to place the second jmp instruction.
     /// The address must be in +/- 2GB of the hooking address and the length must be not less than
-    /// 14 bytes. Usually you may try to look for a code gap from the code section of the PE/ELF.
+    /// 14 bytes, and the memory protect must be RWE. Usually you may try to look for a code gap
+    /// from the code section of the PE/ELF.
     /// `jmp _SecondJmp`
     /// `_SecondJmp:`
     /// `jmp qword ptr [rip+0]`
