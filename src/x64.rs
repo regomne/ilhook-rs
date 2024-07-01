@@ -183,7 +183,7 @@ pub trait ThreadCallback {
 /// Option for thread callback
 pub enum CallbackOption {
     /// Valid callback
-    Some(Box<dyn ThreadCallback>),
+    Some(Box<dyn ThreadCallback + Sync + Send>),
     /// No callback
     None,
 }
