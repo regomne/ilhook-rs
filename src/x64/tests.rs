@@ -233,9 +233,9 @@ extern "win64" fn foo(x: u64, _: u64, _: u64, _: u64, y: u64) -> u64 {
 #[cfg(test)]
 unsafe extern "win64" fn on_foo(reg: *mut Registers, old_func: usize, user_data: usize) -> usize {
     let old_func =
-        std::mem::transmute::<usize, extern "win64" fn(u64, u64, u64, u64, u64) -> u64>(old_func);
-    let arg_y = ((*reg).rsp + 0x28) as *const u64;
-    old_func((*reg).rcx, 0, 0, 0, *arg_y) as usize + user_data
+        unsafe { std::mem::transmute::<usize, extern "win64" fn(u64, u64, u64, u64, u64) -> u64>(old_func) };
+    let arg_y = (unsafe { (*reg).rsp } + 0x28) as *const u64;
+    old_func(unsafe { (*reg).rcx }, 0, 0, 0, unsafe { *arg_y }) as usize + user_data
 }
 #[test]
 fn test_hook_function() {

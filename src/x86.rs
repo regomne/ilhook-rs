@@ -123,7 +123,7 @@ impl Registers {
     /// Process may crash if register `esp` does not point to a valid stack.
     #[must_use]
     pub unsafe fn get_arg(&self, cnt: usize) -> u32 {
-        *((self.esp as usize + cnt * 4) as *mut u32)
+        unsafe { *((self.esp as usize + cnt * 4) as *mut u32) }
     }
 }
 

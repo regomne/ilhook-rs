@@ -1,9 +1,9 @@
 [package]
 name = "ilhook"
 description = "A library that provides methods to inline hook binary codes in x86 and x86_64 architecture"
-version = "2.1.1"
+version = "2.1.2"
 authors = ["regomne <fallingsunz@gmail.com>"]
-edition = "2021"
+edition = "2024"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/regomne/ilhook-rs"
@@ -11,17 +11,16 @@ keywords = ["hook", "assemble", "disassemble"]
 categories = ["hardware-support"]
 
 [dependencies]
-iced-x86 = { version = "1.20", default-features = false, features = ["std", "decoder", "block_encoder", "instr_info"] }
+iced-x86 = { version = "1.21", default-features = false, features = ["std", "decoder", "block_encoder", "instr_info"] }
 thiserror = "1.0"
 bitflags = "2.0"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 regex = "1"
-lazy_static = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.42.0", features = ["Win32_Foundation", "Win32_System_Memory"] }
+windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_System_Memory"] }
 
 [profile.release]
 lto = true

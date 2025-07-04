@@ -1,10 +1,10 @@
 use super::{cmp, HookError};
-use lazy_static::lazy_static;
 use regex::Regex;
 use std::format;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::process;
+use std::sync::LazyLock;
 
 use libc::{
     __errno_location, c_void, mmap, munmap, sysconf, MAP_ANONYMOUS, MAP_FIXED_NOREPLACE,
@@ -112,9 +112,7 @@ struct MemoryBlock {
 }
 impl MemoryBlock {
     fn from_string(s: String) -> Result<Self, HookError> {
-        lazy_static! {
-            static ref RE: Regex = Regex::new("^([a-fA-F0-9]+)-([a-fA-F0-9]+)").unwrap();
-        }
+        static RE: LazyLock<Regex> = LazyLock::new(|| Regex::new("^([a-fA-F0-9]+)-([a-fA-F0-9]+)").unwrap());
         //let RE = Regex::new("").unwrap();
         RE.captures(&s)
             .ok_or(HookError::MemoryLayoutFormat)

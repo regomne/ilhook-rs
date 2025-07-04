@@ -167,7 +167,7 @@ impl Registers {
     /// Process may crash if register `rsp` does not point to a valid stack.
     #[must_use]
     pub unsafe fn get_stack(&self, cnt: usize) -> u64 {
-        *((self.rsp as usize + cnt * 8) as *mut u64)
+        unsafe { *((self.rsp as usize + cnt * 8) as *mut u64) }
     }
 }
 
