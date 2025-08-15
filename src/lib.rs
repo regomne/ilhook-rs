@@ -63,7 +63,7 @@ Now let's start:
 use ilhook::x86::{Hooker, HookType, Registers, CallbackOption, HookFlags};
 
 # #[cfg(target_arch = "x86")]
-unsafe extern "C" fn on_check_sn(reg:*mut Registers, _:usize){
+unsafe extern "cdecl" fn on_check_sn(reg:*mut Registers, _:usize){
     println!("machine_hash: {}, sn_hash: {}", (*reg).ebx, (*reg).eax);
     (*reg).eax = (*reg).ebx; //we modify the sn_hash!
 }
