@@ -142,8 +142,10 @@ mod err;
 
 pub use err::HookError;
 
+#[cfg(feature = "x86")]
 /// The x86 hooker
 pub mod x86;
 
+#[cfg(feature = "x64")]
 /// The x64 hooker
 pub mod x64;

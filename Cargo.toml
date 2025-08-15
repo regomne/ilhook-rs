@@ -26,3 +26,8 @@ windows-sys = { version = "0.60", features = ["Win32_Foundation", "Win32_System_
 lto = true
 codegen-units = 1
 opt-level = 3
+
+[features]
+default = ["x86", "x64"]
+x86 = []
+x64 = []
