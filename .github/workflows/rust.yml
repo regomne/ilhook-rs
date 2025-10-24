@@ -17,9 +17,9 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Build
-      run: cargo build -r --verbose
+      run: cargo build --no-default-features -F x64 -r --verbose
     - name: Run tests
-      run: cargo test -r --verbose -- --test-threads=1
+      run: cargo test --no-default-features -F x64 -r --verbose -- --test-threads=1
       
   win-64-test:
     runs-on: windows-latest
@@ -27,9 +27,9 @@ jobs:
     steps:
     - uses: actions/checkout@v3
     - name: Build
-      run: cargo build -r --verbose
+      run: cargo build --no-default-features -F x64 -r --verbose
     - name: Run tests
-      run: cargo test -r --verbose -- --test-threads=1
+      run: cargo test --no-default-features -F x64 -r --verbose -- --test-threads=1
       
   linux-32-test:
     runs-on: ubuntu-latest
@@ -39,9 +39,9 @@ jobs:
     - name: Setup 32-bit env
       run: rustup target add i686-unknown-linux-musl
     - name: Build
-      run: cargo build --target i686-unknown-linux-musl -r --verbose
+      run: cargo build --no-default-features -F x86 --target i686-unknown-linux-musl -r --verbose
     - name: Run tests
-      run: cargo test --target i686-unknown-linux-musl -r --verbose -- --test-threads=1
+      run: cargo test --no-default-features -F x86 --target i686-unknown-linux-musl -r --verbose -- --test-threads=1
 
   win-32-test:
     runs-on: windows-latest
@@ -51,6 +51,6 @@ jobs:
     - name: Setup 32-bit env
       run: rustup target add i686-pc-windows-msvc
     - name: Build
-      run: cargo build --target i686-pc-windows-msvc -r --verbose
+      run: cargo build --no-default-features -F x86 --target i686-pc-windows-msvc -r --verbose
     - name: Run tests
-      run: cargo test --target i686-pc-windows-msvc -r --verbose -- --test-threads=1
+      run: cargo test --no-default-features -F x86 --target i686-pc-windows-msvc -r --verbose -- --test-threads=1
