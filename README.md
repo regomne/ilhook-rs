@@ -100,7 +100,7 @@ fn foo(x: u64) -> u64 {
 assert_eq!(foo(5), 25);
 ```
 
-And you want to let it return `x*x+3`, which means foo(5)==28.
+And you want to let it return `old_foo(x)+x`, which means foo(5)==30.
 
 Now let's hook:
 
@@ -109,11 +109,13 @@ use ilhook::x64::{Hooker, HookType, Registers, CallbackOption, HookFlags};
 
 unsafe extern "win64" fn new_foo(
     reg: *mut Registers,
-    _ :usize,
+    ori_func_ptr :usize,
     _ :usize
 ) -> usize {
-    let x = (&*reg).rdi as usize;
-    x * x + 3
+    let x = (&*reg).rdi as u64;
+    let ori_func: extern "win64" fn (u64) -> u64 =
+        unsafe { std::mem::transmute(ori_func_ptr) };
+    (ori_func(x) + x) as usize
 }
 
 let hooker = Hooker::new(
@@ -124,7 +126,7 @@ let hooker = Hooker::new(
     HookFlags::empty(),
 );
 unsafe { hooker.hook().unwrap() };
-assert_eq!(foo(5), 28);
+assert_eq!(foo(5), 30);
 ```
 
 ## Jmp-addr hook
