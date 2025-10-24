@@ -26,7 +26,6 @@ matrix:
       dist: trusty
 install: rustup target add ${TARGET}
 script:
-    - cargo build --verbose --target=${TARGET}
     - |
       if [[ ${TARGET} == i686-* ]]; then
         cargo test --no-default-features -F x86 --verbose --target=${TARGET} -- --test-threads=1
