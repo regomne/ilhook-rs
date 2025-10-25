@@ -172,6 +172,14 @@ pub struct HookPoint {
     flags: HookFlags,
 }
 
+/// The hook result returned by [hook_closure_jmp_back], [hook_closure_retn],
+/// [hook_closure_jmp_to_addr], and [hook_closure_jmp_to_ret]. This ensures
+/// that the closure's lifetime lasts as long as the hook.
+pub struct ClosureHookPoint<T> {
+    _inner: HookPoint,
+    _callback: Box<T>,
+}
+
 #[cfg(not(target_arch = "x86"))]
 fn env_lock() {
     panic!("This crate should only be used in arch x86_32!")
@@ -240,6 +248,165 @@ impl Hooker {
             flags: self.flags,
         })
     }
+
+    /// A high-level helper for hooking a function using the [JmpBackRoutine]
+    /// strategy. The [callback] is called before any calls to the function at
+    /// [address], and then the original function is called as normal
+    /// afterwards.
+    ///
+    /// The callback is passed [Registers] that provide access to the original
+    /// function's arguments.
+    ///
+    /// ## Safety
+    ///
+    /// See [hook] for details on when this is safe to call.
+    pub unsafe fn hook_closure_jmp_back<'a, T: Fn(*mut Registers) + 'a>(
+        address: usize,
+        callback: T,
+        callback_option: CallbackOption,
+        hook_flags: HookFlags,
+    ) -> Result<ClosureHookPoint<T>, HookError> {
+        let callback = Box::new(callback);
+        let hooker = Self::new(
+            address,
+            HookType::JmpBack(run_jmp_back_closure::<T>),
+            callback_option,
+            &*callback as *const T as usize,
+            hook_flags,
+        );
+        Ok(ClosureHookPoint {
+            _inner: unsafe { hooker.hook()? },
+            _callback: callback,
+        })
+    }
+
+    /// A high-level helper for hooking a function using the [RetnRoutine]
+    /// strategy. All calls to the function at [address] are routed to
+    /// [callback] instead, and its return value is used in place of the
+    /// original function's return value.
+    ///
+    /// The callback is passed [Registers] that provide access to the original
+    /// function's arguments, as well as a usize that can be cast to the
+    /// original function's signature using [std::mem::transmute].
+    ///
+    /// The [mnemonic] is the mnemonic of the `retn` instruction.
+    ///
+    /// ## Safety
+    ///
+    /// See [hook] for details on when this is safe to call.
+    pub unsafe fn hook_closure_retn<'a, T: (Fn(*mut Registers, usize) -> usize) + 'a>(
+        address: usize,
+        mnemonic: usize,
+        callback: T,
+        callback_option: CallbackOption,
+        hook_flags: HookFlags,
+    ) -> Result<ClosureHookPoint<T>, HookError> {
+        let callback = Box::new(callback);
+        let hooker = Self::new(
+            address,
+            HookType::Retn(mnemonic, run_retn_closure::<T>),
+            callback_option,
+            &*callback as *const T as usize,
+            hook_flags,
+        );
+        Ok(ClosureHookPoint {
+            _inner: unsafe { hooker.hook()? },
+            _callback: callback,
+        })
+    }
+
+    /// A high-level helper for hooking a function using the [JmpToAddrRoutine]
+    /// strategy. All calls to the function at [address] are routed to
+    /// [callback] instead, then the function at [follow_up] is called and its
+    /// return value is used in place of the original function's.
+    ///
+    /// The callback is passed [Registers] that provide access to the original
+    /// function's arguments, as well as a usize that can be cast to the
+    /// original function's signature using [std::mem::transmute].
+    ///
+    /// ## Safety
+    ///
+    /// See [hook] for details on when this is safe to call.
+    pub unsafe fn hook_closure_jmp_to_addr<'a, T: Fn(*mut Registers, usize) + 'a>(
+        address: usize,
+        follow_up: usize,
+        callback: T,
+        callback_option: CallbackOption,
+        hook_flags: HookFlags,
+    ) -> Result<ClosureHookPoint<T>, HookError> {
+        let callback = Box::new(callback);
+        let hooker = Self::new(
+            address,
+            HookType::JmpToAddr(follow_up, run_jmp_to_addr_closure::<T>),
+            callback_option,
+            &*callback as *const T as usize,
+            hook_flags,
+        );
+        Ok(ClosureHookPoint {
+            _inner: unsafe { hooker.hook()? },
+            _callback: callback,
+        })
+    }
+
+    /// A high-level helper for hooking a function using the [JmpToRetRoutine]
+    /// strategy. All calls to the function at [address] are routed to
+    /// [callback] instead, then the function at the addressed returned by
+    /// [callback] is called and its return value is used in place of the
+    /// original function's
+    ///
+    /// The callback is passed [Registers] that provide access to the original
+    /// function's arguments, as well as a usize that can be cast to the
+    /// original function's signature using [std::mem::transmute].
+    ///
+    /// ## Safety
+    ///
+    /// See [hook] for details on when this is safe to call.
+    pub unsafe fn hook_closure_jmp_to_ret<'a, T: (Fn(*mut Registers, usize) -> usize) + 'a>(
+        address: usize,
+        callback: T,
+        callback_option: CallbackOption,
+        hook_flags: HookFlags,
+    ) -> Result<ClosureHookPoint<T>, HookError> {
+        let callback = Box::new(callback);
+        let hooker = Self::new(
+            address,
+            HookType::JmpToRet(run_retn_closure::<T>),
+            callback_option,
+            &*callback as *const T as usize,
+            hook_flags,
+        );
+        Ok(ClosureHookPoint {
+            _inner: unsafe { hooker.hook()? },
+            _callback: callback,
+        })
+    }
+}
+
+/// The userdata trampoline for [Hooker::hook_closure_jmp_back].
+unsafe extern "cdecl" fn run_jmp_back_closure<T: Fn(*mut Registers)>(
+    reg: *mut Registers,
+    callback: usize,
+) {
+    unsafe { (*(callback as *const T))(reg) };
+}
+
+/// The userdata trampoline for [Hooker::hook_closure_retn] *and*
+/// [Hooker::hook_closure_jmp_to_ret].
+unsafe extern "cdecl" fn run_retn_closure<T: Fn(*mut Registers, usize) -> usize>(
+    reg: *mut Registers,
+    original: usize,
+    callback: usize,
+) -> usize {
+    unsafe { (*(callback as *const T))(reg, original) }
+}
+
+/// The userdata trampoline for [Hooker::hook_closure_jmp_to_addr].
+unsafe extern "cdecl" fn run_jmp_to_addr_closure<T: Fn(*mut Registers, usize)>(
+    reg: *mut Registers,
+    original: usize,
+    callback: usize,
+) {
+    unsafe { (*(callback as *const T))(reg, original) };
 }
 
 impl HookPoint {
