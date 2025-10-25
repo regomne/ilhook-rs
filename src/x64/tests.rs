@@ -231,18 +231,18 @@ extern "win64" fn foo(x: u64, _: u64, _: u64, _: u64, y: u64) -> u64 {
     x * x + y
 }
 #[cfg(test)]
-unsafe extern "win64" fn on_foo(reg: *mut Registers, old_func: usize, user_data: usize) -> usize {
-    let old_func: extern "win64" fn(u64, u64, u64, u64, u64) -> u64 =
+unsafe extern "win64" fn new_foo(reg: *mut Registers, old_func: usize, user_data: usize) -> usize {
+    let old_foo: extern "win64" fn(u64, u64, u64, u64, u64) -> u64 =
         unsafe { std::mem::transmute(old_func) };
     let arg_y = (unsafe { (*reg).rsp } + 0x28) as *const u64;
-    old_func(unsafe { (*reg).rcx }, 0, 0, 0, unsafe { *arg_y }) as usize + user_data
+    old_foo(unsafe { (*reg).rcx }, 0, 0, 0, unsafe { *arg_y }) as usize + user_data
 }
 #[test]
 fn test_hook_function() {
     assert_eq!(foo(5, 0, 0, 0, 3), 28);
     let hooker = Hooker::new(
         foo as usize,
-        HookType::Retn(on_foo),
+        HookType::Retn(new_foo),
         CallbackOption::None,
         100,
         HookFlags::empty(),
@@ -250,5 +250,26 @@ fn test_hook_function() {
     let info = unsafe { hooker.hook().unwrap() };
     assert_eq!(foo(5, 0, 0, 0, 3), 128);
     unsafe { info.unhook().unwrap() };
+    assert_eq!(foo(5, 0, 0, 0, 3), 28);
+}
+
+#[test]
+fn test_hook_function_closure() {
+    assert_eq!(foo(5, 0, 0, 0, 3), 28);
+
+    let val_to_plus = 100;
+
+    let new_foo = |reg: *mut Registers, old_func: usize| -> usize {
+        let old_foo: extern "win64" fn(u64, u64, u64, u64, u64) -> u64 =
+            unsafe { std::mem::transmute(old_func) };
+        let arg_y = (unsafe { (*reg).rsp } + 0x28) as *const u64;
+        old_foo(unsafe { (*reg).rcx }, 0, 0, 0, unsafe { *arg_y }) as usize + val_to_plus
+    };
+
+    let hook_point = unsafe {
+        hook_closure_retn(foo as usize, new_foo, CallbackOption::None, HookFlags::empty())
+    }.unwrap();
+    assert_eq!(foo(5, 0, 0, 0, 3), 128);
+    drop(hook_point);
     assert_eq!(foo(5, 0, 0, 0, 3), 28);
 }
