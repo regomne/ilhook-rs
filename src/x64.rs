@@ -315,7 +315,7 @@ impl Hooker {
 ///
 /// ## Safety
 ///
-/// See [Hooker.hook] for details on when this is safe to call.
+/// See [`Hooker::hook`] for details on when this is safe to call.
 pub unsafe fn hook_closure_jmp_back<'a, T: Fn(*mut Registers) + Send + Sync + 'a>(
     address: usize,
     callback: T,
@@ -347,7 +347,7 @@ pub unsafe fn hook_closure_jmp_back<'a, T: Fn(*mut Registers) + Send + Sync + 'a
 ///
 /// ## Safety
 ///
-/// See [Hooker.hook] for details on when this is safe to call.
+/// See [`Hooker::hook`] for details on when this is safe to call.
 pub unsafe fn hook_closure_retn<
     'a,
     T: (Fn(*mut Registers, usize) -> usize) + Send + Sync + 'a,
@@ -382,7 +382,7 @@ pub unsafe fn hook_closure_retn<
 ///
 /// ## Safety
 ///
-/// See [Hooker.hook] for details on when this is safe to call.
+/// See [`Hooker::hook`] for details on when this is safe to call.
 pub unsafe fn hook_closure_jmp_to_addr<'a, T: Fn(*mut Registers, usize) + Send + Sync + 'a>(
     address: usize,
     follow_up: usize,
@@ -416,7 +416,7 @@ pub unsafe fn hook_closure_jmp_to_addr<'a, T: Fn(*mut Registers, usize) + Send +
 ///
 /// ## Safety
 ///
-/// See [Hooker.hook] for details on when this is safe to call.
+/// See [`Hooker::hook`] for details on when this is safe to call.
 pub unsafe fn hook_closure_jmp_to_ret<
     'a,
     T: (Fn(*mut Registers, usize) -> usize) + Send + Sync + 'a,
