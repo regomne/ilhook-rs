@@ -194,6 +194,8 @@ bitflags! {
         /// If set, will not modify the memory protection of the destination address, so that
         /// the `hook` function could be ALMOST thread-safe.
         const NOT_MODIFY_MEMORY_PROTECT = 0x1;
+        /// If set, will leave trampoline after unhooking.
+        const LEAVE_TRAMPOLINE = 0x2;
     }
 }
 
@@ -468,9 +470,25 @@ unsafe extern "win64" fn run_jmp_to_addr_closure<T: Fn(*mut Registers, usize)>(
 }
 
 impl HookPoint {
-    /// Consume self and unhook the address.
-    pub unsafe fn unhook(self) -> Result<(), HookError> {
-        self.unhook_by_ref()
+     /// Consume self and unhook the address.
+     pub unsafe fn unhook(mut self) -> Result<(), HookError> {
+        self.unhook_by_ref()?;
+
+        // Create a new box with zero-initialized array 
+        let empty_trampoline = Box::new([0u8; TRAMPOLINE_MAX_LEN]);
+        
+        // Replace the trampoline with empty one and get ownership of original
+        let trampoline = std::mem::replace(&mut self.trampoline, empty_trampoline);
+        
+        if !self.flags.contains(HookFlags::LEAVE_TRAMPOLINE) {
+            // Normal drop of trampoline
+            drop(trampoline);
+        } else {
+            // Leak the trampoline memory
+            Box::leak(trampoline);
+        }
+
+        Ok(())
     }
 
     fn unhook_by_ref(&self) -> Result<(), HookError> {
@@ -482,11 +500,13 @@ impl HookPoint {
         } else {
             ret = recover_jmp_with_thread_cb(self)
         }
-        recover_mem_protect(
-            self.trampoline.as_ptr() as usize,
-            self.trampoline.len(),
-            self.trampoline_prot,
-        );
+        if !self.flags.contains(HookFlags::LEAVE_TRAMPOLINE) {
+            recover_mem_protect(
+                self.trampoline.as_ptr() as usize,
+                self.trampoline.len(),
+                self.trampoline_prot,
+            );
+        }
         ret
     }
 }
@@ -564,10 +584,10 @@ fn write_trampoline_prolog(buf: &mut impl Write) -> Result<usize, std::io::Error
     // push r14
     // push r15
     // sub rsp,0x40
-    // movaps xmmword ptr ss:[rsp],xmm0
-    // movaps xmmword ptr ss:[rsp+0x10],xmm1
-    // movaps xmmword ptr ss:[rsp+0x20],xmm2
-    // movaps xmmword ptr ss:[rsp+0x30],xmm3
+    // movups xmmword ptr ss:[rsp],xmm0
+    // movups xmmword ptr ss:[rsp+0x10],xmm1
+    // movups xmmword ptr ss:[rsp+0x20],xmm2
+    // movups xmmword ptr ss:[rsp+0x30],xmm3
     buf.write(&[
         0x54, 0x9C, 0x48, 0xF7, 0xC4, 0x08, 0x00, 0x00, 0x00, 0x74, 0x2C, 0x50, 0x48, 0x83, 0xEC,
         0x10, 0x48, 0x8B, 0x44, 0x24, 0x20, 0x48, 0x89, 0x04, 0x24, 0x48, 0x8B, 0x44, 0x24, 0x18,
@@ -577,16 +597,16 @@ fn write_trampoline_prolog(buf: &mut impl Write) -> Result<usize, std::io::Error
         0x18, 0x48, 0x8B, 0x44, 0x24, 0x10, 0x48, 0x89, 0x44, 0x24, 0x08, 0xC7, 0x44, 0x24, 0x10,
         0x00, 0x00, 0x00, 0x00, 0x53, 0x51, 0x52, 0x56, 0x57, 0x55, 0x41, 0x50, 0x41, 0x51, 0x41,
         0x52, 0x41, 0x53, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xEC, 0x40,
-        0x0F, 0x29, 0x04, 0x24, 0x0F, 0x29, 0x4C, 0x24, 0x10, 0x0F, 0x29, 0x54, 0x24, 0x20, 0x0F,
-        0x29, 0x5C, 0x24, 0x30,
+        0x0F, 0x11, 0x04, 0x24, 0x0F, 0x11, 0x4C, 0x24, 0x10, 0x0F, 0x11, 0x54, 0x24, 0x20, 0x0F,
+        0x11, 0x5C, 0x24, 0x30,
     ])
 }
 
 fn write_trampoline_epilog1(buf: &mut impl Write) -> Result<usize, std::io::Error> {
-    // movaps xmm0,xmmword ptr ss:[rsp]
-    // movaps xmm1,xmmword ptr ss:[rsp+0x10]
-    // movaps xmm2,xmmword ptr ss:[rsp+0x20]
-    // movaps xmm3,xmmword ptr ss:[rsp+0x30]
+    // movups xmm0,xmmword ptr ss:[rsp]
+    // movups xmm1,xmmword ptr ss:[rsp+0x10]
+    // movups xmm2,xmmword ptr ss:[rsp+0x20]
+    // movups xmm3,xmmword ptr ss:[rsp+0x30]
     // add rsp,0x40
     // pop r15
     // pop r14
@@ -604,8 +624,8 @@ fn write_trampoline_epilog1(buf: &mut impl Write) -> Result<usize, std::io::Erro
     // pop rbx
     // add rsp,8
     buf.write(&[
-        0x0F, 0x28, 0x04, 0x24, 0x0F, 0x28, 0x4C, 0x24, 0x10, 0x0F, 0x28, 0x54, 0x24, 0x20, 0x0F,
-        0x28, 0x5C, 0x24, 0x30, 0x48, 0x83, 0xC4, 0x40, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41,
+        0x0F, 0x10, 0x04, 0x24, 0x0F, 0x10, 0x4C, 0x24, 0x10, 0x0F, 0x10, 0x54, 0x24, 0x20, 0x0F,
+        0x10, 0x5C, 0x24, 0x30, 0x48, 0x83, 0xC4, 0x40, 0x41, 0x5F, 0x41, 0x5E, 0x41, 0x5D, 0x41,
         0x5C, 0x41, 0x5B, 0x41, 0x5A, 0x41, 0x59, 0x41, 0x58, 0x5D, 0x5F, 0x5E, 0x5A, 0x59, 0x5B,
         0x48, 0x83, 0xC4, 0x08,
     ])
@@ -903,7 +923,9 @@ fn modify_mem_protect(addr: usize, len: usize) -> Result<u32, HookError> {
         let ret = unsafe {
             mprotect(
                 (addr & !(page_size as usize - 1)) as *mut c_void,
-                page_size as usize,
+                // There is a risk where our code is at the end of a page and runs into non executable memory
+                // So we need to change the next page as well
+                (page_size as usize) * 2,
                 7,
             )
         };
@@ -929,7 +951,9 @@ fn recover_mem_protect(addr: usize, _: usize, old: u32) {
     unsafe {
         mprotect(
             (addr & !(page_size as usize - 1)) as *mut c_void,
-            page_size as usize,
+            // There is a risk where our code is at the end of a page and runs into non executable memory
+            // So we need to change the next page as well
+            (page_size as usize) * 2,
             old as i32,
         )
     };
