@@ -130,6 +130,41 @@ the destination address may change by the input arguments.
 
 The EIP will jump to the value the callback routine returns.
 
+# Closure Hooks
+
+This crate provides utility functions for registering hooks that use Rust
+closures as callbacks rather than `extern "C" fn`s. This involves more layers of
+indirection, so it's slightly less efficient, especially when the callbacks
+don't actually close over any data. However, it can be useful if you do have
+additional data, especially since the closure's lifetime is automatically tied
+to the `ClosureHookPoint` that controls when the hook is disposed of.
+
+The closure hook functions are `Hooker::hook_closure_jmp_back`,
+`Hooker::hook_closure_retn`, `Hooker::hook_closure_jmp_to_addr`, and
+`Hooker::hook_closure_jmp_to_ret`. They match the behavior of the four
+`HookType`s.
+
+Here's the same `on_check_sn` example we used above, using a closure hook
+instead:
+
+```rust
+# #[cfg(target_arch = "x86")]
+use ilhook::x86::{Registers, CallbackOption, HookFlags, hook_closure_jmp_back};
+
+# #[cfg(target_arch = "x86")]
+let on_check_sn = |reg:*mut Registers| {
+    println!("m_hash: {}, sn_hash: {}", unsafe {(*reg).ebx}, unsafe {(*reg).eax});
+    unsafe{ (*reg).eax = (*reg).ebx };
+};
+
+// unsafe { hook_closure_jmp_back(
+//     0x40107F,
+//     on_check_sn,
+//     CallbackOption::None,
+//     HookFlags::empty(),
+// ) }.unwrap();
+```
+
 # Notes
 
 This crate is not thread-safe if you don't specify `HookFlags::NOT_MODIFY_MEMORY_PROTECT`. Of course,

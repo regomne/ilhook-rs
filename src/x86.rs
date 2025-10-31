@@ -175,10 +175,15 @@ pub struct HookPoint {
 /// The hook result returned by [hook_closure_jmp_back], [hook_closure_retn],
 /// [hook_closure_jmp_to_addr], and [hook_closure_jmp_to_ret]. This ensures
 /// that the closure's lifetime lasts as long as the hook.
-pub struct ClosureHookPoint<T> {
+pub struct ClosureHookPoint<'a> {
     _inner: HookPoint,
-    _callback: Box<T>,
+    _callback: Box<dyn HookCallback + 'a>,
 }
+
+/// A dyn-compatible universal trait we use to be able to store all the
+/// different types of closures in [ClosureHookPoint] without using generics.
+trait HookCallback {}
+impl<T> HookCallback for T {}
 
 #[cfg(not(target_arch = "x86"))]
 fn env_lock() {
@@ -260,13 +265,13 @@ impl Hooker {
 ///
 /// ## Safety
 ///
-/// See [Hooker.hook] for details on when this is safe to call.
+/// See [`Hooker::hook`] for details on when this is safe to call.
 pub unsafe fn hook_closure_jmp_back<'a, T: Fn(*mut Registers) + 'a>(
     address: usize,
     callback: T,
     callback_option: CallbackOption,
     hook_flags: HookFlags,
-) -> Result<ClosureHookPoint<T>, HookError> {
+) -> Result<ClosureHookPoint<'a>, HookError> {
     let callback = Box::new(callback);
     let hooker = Hooker::new(
         address,
@@ -294,14 +299,14 @@ pub unsafe fn hook_closure_jmp_back<'a, T: Fn(*mut Registers) + 'a>(
 ///
 /// ## Safety
 ///
-/// See [Hooker.hook] for details on when this is safe to call.
+/// See [`Hooker::hook`] for details on when this is safe to call.
 pub unsafe fn hook_closure_retn<'a, T: (Fn(*mut Registers, usize) -> usize) + 'a>(
     address: usize,
     mnemonic: usize,
     callback: T,
     callback_option: CallbackOption,
     hook_flags: HookFlags,
-) -> Result<ClosureHookPoint<T>, HookError> {
+) -> Result<ClosureHookPoint<'a>, HookError> {
     let callback = Box::new(callback);
     let hooker = Hooker::new(
         address,
@@ -327,14 +332,14 @@ pub unsafe fn hook_closure_retn<'a, T: (Fn(*mut Registers, usize) -> usize) + 'a
 ///
 /// ## Safety
 ///
-/// See [Hooker.hook] for details on when this is safe to call.
+/// See [`Hooker::hook`] for details on when this is safe to call.
 pub unsafe fn hook_closure_jmp_to_addr<'a, T: Fn(*mut Registers, usize) + 'a>(
     address: usize,
     follow_up: usize,
     callback: T,
     callback_option: CallbackOption,
     hook_flags: HookFlags,
-) -> Result<ClosureHookPoint<T>, HookError> {
+) -> Result<ClosureHookPoint<'a>, HookError> {
     let callback = Box::new(callback);
     let hooker = Hooker::new(
         address,
@@ -361,13 +366,13 @@ pub unsafe fn hook_closure_jmp_to_addr<'a, T: Fn(*mut Registers, usize) + 'a>(
 ///
 /// ## Safety
 ///
-/// See [Hooker.hook] for details on when this is safe to call.
+/// See [`Hooker::hook`] for details on when this is safe to call.
 pub unsafe fn hook_closure_jmp_to_ret<'a, T: (Fn(*mut Registers, usize) -> usize) + 'a>(
     address: usize,
     callback: T,
     callback_option: CallbackOption,
     hook_flags: HookFlags,
-) -> Result<ClosureHookPoint<T>, HookError> {
+) -> Result<ClosureHookPoint<'a>, HookError> {
     let callback = Box::new(callback);
     let hooker = Hooker::new(
         address,
