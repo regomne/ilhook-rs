@@ -455,7 +455,9 @@ fn get_moving_insts(addr: usize) -> Result<(Vec<Instruction>, Vec<u8>), HookErro
     let mut ori_insts: Vec<Instruction> = vec![];
     for inst in &mut decoder {
         if inst.is_invalid() {
-            return Err(HookError::Disassemble);
+            return Err(HookError::Disassemble(code_slice[0..30.min(code_slice.len())]
+                .try_into()
+                .unwrap()));
         }
         ori_insts.push(inst);
         total_bytes += inst.len();

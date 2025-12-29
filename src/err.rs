@@ -25,8 +25,8 @@ pub enum HookError {
     MemoryLayoutFormat,
 
     /// Can't disassemble in the specified address
-    #[error("disassemble error")]
-    Disassemble,
+    #[error("disassemble error, bytes:{0:?}")]
+    Disassemble([u8;30]),
 
     /// Can't move code
     #[error("moving code error")]
