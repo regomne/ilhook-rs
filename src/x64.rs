@@ -503,6 +503,27 @@ fn get_moving_insts(
     min_bytes: usize,
 ) -> Result<(Vec<Instruction>, Vec<u8>), HookError> {
     let code_slice = unsafe { slice::from_raw_parts(addr as *const u8, MAX_INST_LEN * 2) };
+    // An absolute jump stub stores its destination in the eight bytes immediately
+    // following the instruction. These bytes are part of the patch, not code.
+    // Preserve the destination by value because the next hook overwrites that slot.
+    if min_bytes == 14 && code_slice.starts_with(&[0xff, 0x25, 0, 0, 0, 0]) {
+        let target = u64::from_le_bytes(code_slice[6..14].try_into().unwrap());
+        let mut inst = Instruction::with_branch(iced_x86::Code::Jmp_rel32_64, target)
+            .map_err(|_| HookError::MoveCode)?;
+        inst.set_ip(addr as u64);
+        inst.set_len(14);
+        return Ok((vec![inst], code_slice[..14].to_vec()));
+    }
+
+    // A near jump at the entry is also terminal. The remaining patch bytes
+    // may contain data left by an earlier absolute jump.
+    if min_bytes == 14 && code_slice[0] == 0xe9 {
+        let mut decoder = Decoder::new(64, code_slice, DecoderOptions::NONE);
+        decoder.set_ip(addr as u64);
+        let inst = decoder.decode();
+        return Ok((vec![inst], code_slice[..14].to_vec()));
+    }
+
     let mut decoder = Decoder::new(64, code_slice, DecoderOptions::NONE);
     decoder.set_ip(addr as u64);
 
